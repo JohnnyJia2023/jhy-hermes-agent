@@ -1668,6 +1668,43 @@ def resolve_provider_client(
                        "directly supported, try 'auto'", provider)
         return None, None
 
+    elif pconfig.auth_type == "external_process":
+        # External-process providers (e.g. copilot-acp) manage auth through a
+        # background process that supplies a real base_url + api_key at runtime.
+        # Resolve those credentials and build a standard OpenAI client from them.
+        if provider == "copilot-acp":
+            try:
+                from hermes_cli.runtime_provider import (
+                    resolve_external_process_provider_credentials,
+                )
+                from hermes_cli.models import copilot_default_headers
+                creds = resolve_external_process_provider_credentials(provider)
+                ep_base_url = _to_openai_base_url(
+                    (creds.get("base_url") or "").rstrip("/")
+                )
+                ep_api_key = creds.get("api_key", "")
+                if ep_base_url and ep_api_key:
+                    final_model = model or "gpt-4o-mini"
+                    client = OpenAI(
+                        api_key=ep_api_key,
+                        base_url=ep_base_url,
+                        default_headers=copilot_default_headers(),
+                    )
+                    logger.debug(
+                        "resolve_provider_client: copilot-acp via "
+                        "external_process (%s)", final_model
+                    )
+                    return (
+                        _to_async_client(client, final_model)
+                        if async_mode
+                        else (client, final_model)
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "resolve_provider_client: copilot-acp "
+                    "external_process failed: %s", exc
+                )
+
     logger.warning("resolve_provider_client: unhandled auth_type %s for %s",
                    pconfig.auth_type, provider)
     return None, None

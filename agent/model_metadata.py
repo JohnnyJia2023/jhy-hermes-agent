@@ -256,6 +256,11 @@ def _infer_provider_from_url(base_url: str) -> Optional[str]:
     normalized = _normalize_base_url(base_url)
     if not normalized:
         return None
+    # Handle ACP-protocol URLs (e.g. acp://copilot → provider "copilot").
+    # These are not HTTP endpoints so skip the URL parsing path entirely.
+    if normalized.startswith("acp://"):
+        service = normalized[6:].strip("/").split("/")[0]
+        return service or None
     parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
     host = parsed.netloc.lower() or parsed.path.lower()
     for url_part, provider in _URL_TO_PROVIDER.items():
