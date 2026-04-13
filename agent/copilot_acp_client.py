@@ -227,6 +227,27 @@ def _extract_tool_calls_from_text(text: str) -> tuple[list[SimpleNamespace], str
 
 
 
+def probe_copilot_acp(
+    *,
+    timeout_seconds: float = 30.0,
+    prompt_text: str | None = None,
+    command: str | None = None,
+    args: list[str] | None = None,
+    cwd: str | None = None,
+) -> str:
+    """Open a fresh Copilot ACP session and run a tiny probe prompt."""
+    client = CopilotACPClient(
+        command=command,
+        args=args,
+        acp_cwd=cwd,
+    )
+    reply_text, _ = client._run_prompt(
+        (prompt_text or "Reply with OK.").strip(),
+        timeout_seconds=float(timeout_seconds),
+    )
+    return reply_text.strip()
+
+
 def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
     candidate = Path(path_text)
     if not candidate.is_absolute():

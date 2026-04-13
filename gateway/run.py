@@ -471,6 +471,53 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     return ""
 
 
+def _resolve_gateway_provider(config: dict | None = None) -> str:
+    """Read provider from config.yaml for gateway-scoped startup helpers."""
+    cfg = config if config is not None else _load_gateway_config()
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        return str(model_cfg.get("provider") or "").strip()
+    return ""
+
+
+def _copilot_acp_refresh_interval_seconds() -> int:
+    """Return the periodic Copilot ACP refresh interval, or 0 when disabled."""
+    raw = os.getenv("HERMES_COPILOT_ACP_REFRESH_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid HERMES_COPILOT_ACP_REFRESH_INTERVAL_SECONDS=%r; disabling ACP refresh.",
+            raw,
+        )
+        return 0
+
+
+def _copilot_acp_refresh_timeout_seconds() -> float:
+    """Return timeout for the periodic Copilot ACP refresh probe."""
+    raw = os.getenv("HERMES_COPILOT_ACP_REFRESH_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return 30.0
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid HERMES_COPILOT_ACP_REFRESH_TIMEOUT_SECONDS=%r; using default.",
+            raw,
+        )
+        return 30.0
+
+
+def _copilot_acp_refresh_enabled(config: dict | None = None) -> bool:
+    """Whether the gateway should run periodic Copilot ACP keepalive probes."""
+    return (
+        _resolve_gateway_provider(config).lower() == "copilot-acp"
+        and _copilot_acp_refresh_interval_seconds() > 0
+    )
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Resolve the Hermes update command as argv parts.
 
@@ -9622,6 +9669,44 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
+def _start_copilot_acp_refresh_ticker(
+    stop_event: threading.Event,
+    *,
+    interval_seconds: int | None = None,
+    timeout_seconds: float | None = None,
+) -> None:
+    """Periodically open a fresh Copilot ACP session as a keepalive probe."""
+    from agent.copilot_acp_client import probe_copilot_acp
+
+    interval = (
+        interval_seconds
+        if interval_seconds is not None
+        else _copilot_acp_refresh_interval_seconds()
+    )
+    if interval <= 0:
+        return
+    timeout = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else _copilot_acp_refresh_timeout_seconds()
+    )
+
+    logger.info(
+        "Copilot ACP refresh ticker started (interval=%ds, timeout=%.1fs)",
+        interval,
+        timeout,
+    )
+    while not stop_event.is_set():
+        try:
+            probe_copilot_acp(timeout_seconds=timeout)
+            logger.info("Copilot ACP refresh succeeded.")
+        except Exception as exc:
+            logger.warning("Copilot ACP refresh failed: %s", exc)
+        if stop_event.wait(timeout=interval):
+            break
+    logger.info("Copilot ACP refresh ticker stopped")
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -9817,25 +9902,42 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         name="cron-ticker",
     )
     cron_thread.start()
-    
-    # Wait for shutdown
-    await runner.wait_for_shutdown()
+
+    acp_refresh_stop: threading.Event | None = None
+    acp_refresh_thread: threading.Thread | None = None
+    if _copilot_acp_refresh_enabled(_load_gateway_config()):
+        acp_refresh_stop = threading.Event()
+        acp_refresh_thread = threading.Thread(
+            target=_start_copilot_acp_refresh_ticker,
+            args=(acp_refresh_stop,),
+            daemon=True,
+            name="copilot-acp-refresh",
+        )
+        acp_refresh_thread.start()
+
+    try:
+        # Wait for shutdown
+        await runner.wait_for_shutdown()
+    finally:
+        # Stop background tickers cleanly
+        cron_stop.set()
+        cron_thread.join(timeout=5)
+        if acp_refresh_stop is not None:
+            acp_refresh_stop.set()
+        if acp_refresh_thread is not None:
+            acp_refresh_thread.join(timeout=5)
+
+        # Close MCP server connections
+        try:
+            from tools.mcp_tool import shutdown_mcp_servers
+            shutdown_mcp_servers()
+        except Exception:
+            pass
 
     if runner.should_exit_with_failure:
         if runner.exit_reason:
             logger.error("Gateway exiting with failure: %s", runner.exit_reason)
         return False
-    
-    # Stop cron ticker cleanly
-    cron_stop.set()
-    cron_thread.join(timeout=5)
-
-    # Close MCP server connections
-    try:
-        from tools.mcp_tool import shutdown_mcp_servers
-        shutdown_mcp_servers()
-    except Exception:
-        pass
 
     if runner.exit_code is not None:
         raise SystemExit(runner.exit_code)
