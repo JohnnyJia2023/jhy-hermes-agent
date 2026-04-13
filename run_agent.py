@@ -8298,6 +8298,7 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
+        self._planning_nudge_count = 0
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
@@ -10813,14 +10814,60 @@ class AIAgent:
                 else:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
-                    
+
                     # Fix: unmute output when entering the no-tool-call branch
                     # so the user can see empty-response warnings and recovery
                     # status messages.  _mute_post_response was set during a
                     # prior housekeeping tool turn and should not silence the
                     # final response path.
                     self._mute_post_response = False
-                    
+
+                    # ── Planning-without-action nudge ────────────────────
+                    # Detect when the model produces a short planning/intent
+                    # statement (e.g. "I'll check X and pull the results...")
+                    # with no tool calls at all.  Give the model one nudge
+                    # to actually execute rather than silently delivering
+                    # planning text as the final reply.
+                    _visible = self._strip_think_blocks(final_response).strip()
+                    _planning_nudge_count = getattr(self, '_planning_nudge_count', 0)
+                    if (
+                        _visible
+                        and not assistant_message.tool_calls
+                        and _planning_nudge_count < 1
+                        and 50 < len(_visible) < 450
+                        and any(
+                            phrase in _visible.lower()
+                            for phrase in (
+                                "i'll ", "i will ", "let me ", "i'm going to ",
+                                "i am going to ", "i'll check", "i'll search",
+                                "i'll pull", "i'll look", "i'll fetch",
+                                "let me check", "let me search", "let me pull",
+                                "let me look", "let me fetch", "checking ",
+                            )
+                        )
+                    ):
+                        self._planning_nudge_count = _planning_nudge_count + 1
+                        self._vprint(
+                            f"{self.log_prefix}↻ Planning response without tool calls — "
+                            f"nudging to execute (1/1)"
+                        )
+                        # Append the planning text as an assistant turn, then
+                        # add a system nudge so the model takes action next.
+                        plan_msg = self._build_assistant_message(assistant_message, finish_reason)
+                        messages.append(plan_msg)
+                        nudge_msg = {
+                            "role": "user",
+                            "content": (
+                                "[System: You described a plan but did not call any tools. "
+                                "Please execute the plan now using your available tools.]"
+                            ),
+                        }
+                        messages.append(nudge_msg)
+                        self._session_messages = messages
+                        self._save_session_log(messages)
+                        continue
+
+
                     # Check if response only has think block with no actual content after it
                     if not self._has_content_after_think_block(final_response):
                         # ── Partial stream recovery ─────────────────────
@@ -11071,6 +11118,7 @@ class AIAgent:
                     # Reset retry counter/signature on successful content
                     self._empty_content_retries = 0
                     self._thinking_prefill_retries = 0
+                    self._planning_nudge_count = 0
 
                     if (
                         self.api_mode == "codex_responses"

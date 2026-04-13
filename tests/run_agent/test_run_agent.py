@@ -2151,6 +2151,32 @@ class TestRunConversation:
         assert result["final_response"] == "Top 3 stories: A, B, C"
         assert result["api_calls"] == 2
 
+    def test_planning_without_tools_gets_nudge_and_continues(self, agent):
+        """When model gives planning text with no tool calls, it gets one nudge to execute."""
+        self._setup_agent(agent)
+        agent.valid_tool_names = {"web_search"}
+        planning_text = "I'll check the live news feed and pull today's top headlines for you."
+        tc = _mock_tool_call(name="web_search", arguments='{"query": "top news today"}', call_id="ws-1")
+        # First turn: planning text (no tool calls)
+        planning_resp = _mock_response(content=planning_text, finish_reason="stop")
+        # Second turn (after nudge): tool call
+        tool_resp = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        # Third turn: final answer
+        final_resp = _mock_response(content="Top news: Story A, Story B, Story C", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [planning_resp, tool_resp, final_resp]
+
+        with (
+            patch("tools.web_tools.web_search_tool", return_value='{"data": {"web": []}}'),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search top news")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Top news: Story A, Story B, Story C"
+        assert result["api_calls"] == 3
+
     def test_nous_401_refreshes_after_remint_and_retries(self, agent):
         self._setup_agent(agent)
         agent.provider = "nous"
