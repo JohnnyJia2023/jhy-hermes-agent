@@ -52,6 +52,8 @@ def _make_mock_parent(depth=0):
     parent._print_fn = None
     parent.tool_progress_callback = None
     parent.thinking_callback = None
+    parent.acp_command = None
+    parent.acp_args = []
     return parent
 
 
@@ -66,8 +68,11 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("model", props)
+        self.assertIn("provider", props)
         self.assertIn("max_iterations", props)
         self.assertNotIn("maxItems", props["tasks"])  # removed — limit is now runtime-configurable
+        self.assertIn("model", props["tasks"]["items"]["properties"])
 
 
 class TestChildSystemPrompt(unittest.TestCase):
@@ -712,6 +717,55 @@ class TestDelegationProviderIntegration(unittest.TestCase):
     """Integration tests: delegation config → _run_single_child → AIAgent construction."""
 
     @patch("tools.delegate_tool._load_config")
+    def test_top_level_model_override_reaches_child_agent(self, mock_cfg):
+        """Top-level model arg should override the child model while inheriting parent creds."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(
+                goal="Use the stronger GPT tier",
+                model="gpt-5.4",
+                parent_agent=parent,
+            )
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "gpt-5.4")
+            self.assertEqual(kwargs["provider"], parent.provider)
+            self.assertEqual(kwargs["base_url"], parent.base_url)
+
+    @patch("tools.delegate_tool._load_config")
+    def test_task_model_override_wins_over_top_level_model(self, mock_cfg):
+        """Per-task model override should beat the shared top-level model."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(
+                tasks=[{
+                    "goal": "Use the strongest reviewer",
+                    "model": "claude-opus-4.6",
+                }],
+                model="gpt-5.4",
+                parent_agent=parent,
+            )
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "claude-opus-4.6")
+
+    @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     def test_config_provider_credentials_reach_child_agent(self, mock_creds, mock_cfg):
         """When delegation.provider is configured, child agent gets resolved credentials."""
@@ -844,6 +898,44 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["model"], parent.model)
             self.assertEqual(kwargs["provider"], parent.provider)
             self.assertEqual(kwargs["base_url"], parent.base_url)
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_resolved_acp_transport_reaches_child_agent(self, mock_creds, mock_cfg):
+        """Provider resolution should pass ACP command/args through to the child."""
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "gpt-5.4",
+            "provider": "copilot-acp",
+        }
+        mock_creds.return_value = {
+            "model": "gpt-5.4",
+            "provider": "copilot-acp",
+            "base_url": "acp://copilot",
+            "api_key": "copilot-acp",
+            "api_mode": "chat_completions",
+            "command": "/usr/local/bin/copilot",
+            "args": ["--acp", "--stdio"],
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.provider = "openrouter"
+        parent.base_url = "https://openrouter.ai/api/v1"
+        parent.api_key = "sk-parent"
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Use Copilot ACP child", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["provider"], "copilot-acp")
+            self.assertEqual(kwargs["base_url"], "acp://copilot")
+            self.assertEqual(kwargs["acp_command"], "/usr/local/bin/copilot")
+            self.assertEqual(kwargs["acp_args"], ["--acp", "--stdio"])
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

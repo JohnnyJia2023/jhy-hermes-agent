@@ -14,7 +14,8 @@ The `delegate_task` tool spawns child AIAgent instances with isolated context, r
 delegate_task(
     goal="Debug why tests fail",
     context="Error: assertion in test_foo.py line 42",
-    toolsets=["terminal", "file"]
+    toolsets=["terminal", "file"],
+    model="gpt-5.4"
 )
 ```
 
@@ -24,9 +25,9 @@ Up to 3 concurrent subagents:
 
 ```python
 delegate_task(tasks=[
-    {"goal": "Research topic A", "toolsets": ["web"]},
-    {"goal": "Research topic B", "toolsets": ["web"]},
-    {"goal": "Fix the build", "toolsets": ["terminal", "file"]}
+    {"goal": "Research topic A", "toolsets": ["web"], "model": "gpt-5.4"},
+    {"goal": "Research topic B", "toolsets": ["web"], "model": "claude-sonnet-4.6"},
+    {"goal": "Fix the build", "toolsets": ["terminal", "file"], "model": "claude-opus-4.6"}
 ])
 ```
 
@@ -131,16 +132,51 @@ Single-task delegation runs directly without thread pool overhead.
 
 ## Model Override
 
-You can configure a different model for subagents via `config.yaml` — useful for delegating simple tasks to cheaper/faster models:
+You can route subagents to different models at three levels:
+
+1. `delegation.model` / `delegation.provider` in `config.yaml` for the default child tier
+2. top-level `model` / `provider` arguments on a single `delegate_task(...)` call
+3. per-task `model` / `provider` overrides inside `tasks=[...]`
+
+This is useful for an orchestrator pattern where a smaller primary model keeps control and escalates only the harder work.
+
+### Config-Level Default
+
+Useful when you want most delegated work to go to a fixed mid-tier model:
 
 ```yaml
 # In ~/.hermes/config.yaml
 delegation:
-  model: "google/gemini-flash-2.0"    # Cheaper model for subagents
-  provider: "openrouter"              # Optional: route subagents to a different provider
+  model: "gpt-5.4"                    # Default child tier
+  provider: "copilot"                 # Optional: route subagents to a different provider
 ```
 
-If omitted, subagents use the same model as the parent.
+### Per-Call Override
+
+Useful when one specific delegated task needs a stronger model than your default:
+
+```python
+delegate_task(
+    goal="Review the architecture decision and recommend a direction",
+    context="Compare the event-driven and request-driven designs in docs/adr-017.md",
+    toolsets=["file"],
+    model="claude-sonnet-4.6",
+)
+```
+
+### Per-Task Override in a Batch
+
+Useful when different parallel subtasks need different reasoning depth:
+
+```python
+delegate_task(tasks=[
+    {"goal": "Check the failing unit tests", "toolsets": ["terminal", "file"], "model": "gpt-5.4"},
+    {"goal": "Review the caching design", "toolsets": ["file"], "model": "claude-sonnet-4.6"},
+    {"goal": "Stress-test the migration plan", "toolsets": ["file"], "model": "claude-opus-4.6"},
+])
+```
+
+If omitted, subagents fall back to `delegation.model`/`delegation.provider` in config, then finally inherit the parent route.
 
 ## Toolset Selection Tips
 
@@ -184,7 +220,7 @@ Delegation has a **depth limit of 2** — a parent (depth 0) can spawn children 
 - Subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `execute_code`
 - **Interrupt propagation** — interrupting the parent interrupts all active children
 - Only the final summary enters the parent's context, keeping token usage efficient
-- Subagents inherit the parent's **API key, provider configuration, and credential pool** (enabling key rotation on rate limits)
+- Subagents inherit the parent's **API key, provider configuration, and credential pool** unless explicitly overridden (enabling key rotation on rate limits)
 
 ## Delegation vs execute_code
 
@@ -207,8 +243,8 @@ Delegation has a **depth limit of 2** — a parent (depth 0) can spawn children 
 delegation:
   max_iterations: 50                        # Max turns per child (default: 50)
   default_toolsets: ["terminal", "file", "web"]  # Default toolsets
-  model: "google/gemini-3-flash-preview"             # Optional provider/model override
-  provider: "openrouter"                             # Optional built-in provider
+  model: "gpt-5.4"                         # Optional default delegated model
+  provider: "copilot"                      # Optional built-in provider
 
 # Or use a direct custom endpoint instead of provider:
 delegation:
@@ -217,6 +253,8 @@ delegation:
   api_key: "local-key"
 ```
 
+`copilot-acp` is also supported as a delegation provider when you want child agents to use ACP transport instead of the Copilot HTTP API.
+
 :::tip
-The agent handles delegation automatically based on the task complexity. You don't need to explicitly ask it to delegate — it will do so when it makes sense.
+The agent can handle delegation automatically based on task complexity, but you can still explicitly steer the delegated tier with `model` when you want a predictable ladder such as `gpt-5.4-mini -> gpt-5.4 -> claude-sonnet-4.6 -> claude-opus-4.6`.
 :::

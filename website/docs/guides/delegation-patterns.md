@@ -116,6 +116,42 @@ Each subagent researches one option independently. Because they're isolated, the
 
 ---
 
+## Pattern: Tiered Orchestration
+
+Use a smaller primary model as the coordinator, then choose the delegated tier explicitly based on task difficulty:
+
+```python
+delegate_task(tasks=[
+    {
+        "goal": "Triage the failing integration tests and identify the smallest likely fix",
+        "context": "Project at /home/user/app. Focus on tests/integration/payment_flow_test.py",
+        "toolsets": ["terminal", "file"],
+        "model": "gpt-5.4",
+    },
+    {
+        "goal": "Review the cache invalidation design for race conditions",
+        "context": "Architecture notes are in docs/cache-redesign.md",
+        "toolsets": ["file"],
+        "model": "claude-sonnet-4.6",
+    },
+    {
+        "goal": "Stress-test the migration rollout plan for hidden failure modes",
+        "context": "Plan is in docs/migrations/2026-cutover.md. Prioritize operational risk.",
+        "toolsets": ["file"],
+        "model": "claude-opus-4.6",
+    }
+])
+```
+
+A common ladder is:
+
+- `gpt-5.4-mini` for straightforward work handled directly by the parent
+- `gpt-5.4` for bounded implementation and medium debugging
+- `claude-sonnet-4.6` for architecture and harder reasoning
+- `claude-opus-4.6` for the highest-stakes or hardest analysis
+
+---
+
 ## Pattern: Multi-File Refactoring
 
 Split a large refactoring task across parallel subagents, each handling a different part of the codebase:

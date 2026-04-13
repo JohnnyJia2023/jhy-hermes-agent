@@ -80,6 +80,18 @@ def _get_max_concurrent_children() -> int:
 DEFAULT_MAX_ITERATIONS = 50
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
+DELEGATION_TARGET_KEYS = (
+    "model",
+    "provider",
+    "base_url",
+    "api_key",
+    "api_mode",
+)
+VALID_API_MODES = frozenset({
+    "chat_completions",
+    "codex_responses",
+    "anthropic_messages",
+})
 
 
 def check_delegate_requirements() -> bool:
@@ -153,6 +165,92 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
         "delegation", "clarify", "memory", "code_execution",
     }
     return [t for t in toolsets if t not in blocked_toolset_names]
+
+
+def _coerce_api_mode(raw: Any) -> Optional[str]:
+    """Validate an explicit api_mode override."""
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in VALID_API_MODES:
+            return normalized
+    return None
+
+
+def _build_task_delegation_config(
+    base_cfg: dict,
+    task: Optional[Dict[str, Any]] = None,
+    *,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_mode: Optional[str] = None,
+) -> dict:
+    """Merge top-level and per-task target overrides onto the delegation config."""
+    merged = dict(base_cfg or {})
+    top_level = {
+        "model": model,
+        "provider": provider,
+        "base_url": base_url,
+        "api_key": api_key,
+        "api_mode": api_mode,
+    }
+    for key, value in top_level.items():
+        if value not in (None, ""):
+            merged[key] = value
+
+    for key in DELEGATION_TARGET_KEYS:
+        if not isinstance(task, dict) or key not in task:
+            continue
+        value = task.get(key)
+        if value in (None, ""):
+            continue
+        merged[key] = value
+
+    return merged
+
+
+def _resolve_task_delegation_target(
+    cfg: dict,
+    parent_agent,
+    task: Optional[Dict[str, Any]] = None,
+    *,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_mode: Optional[str] = None,
+    acp_command: Optional[str] = None,
+    acp_args: Optional[List[str]] = None,
+) -> dict:
+    """Resolve the effective target model/runtime for a delegated task."""
+    task_cfg = _build_task_delegation_config(
+        cfg,
+        task,
+        model=model,
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
+    )
+    creds = _resolve_delegation_credentials(task_cfg, parent_agent)
+
+    task_command = task.get("acp_command") if isinstance(task, dict) else None
+    resolved_command = task_command or acp_command or creds.get("command")
+
+    task_args = task.get("acp_args") if isinstance(task, dict) else None
+    resolved_args = task_args if task_args is not None else acp_args
+    if resolved_args is None:
+        resolved_args = creds.get("args")
+
+    if resolved_args is not None:
+        resolved_args = list(resolved_args)
+
+    return {
+        **creds,
+        "command": resolved_command,
+        "args": resolved_args,
+    }
 
 
 def _build_child_progress_callback(task_index: int, parent_agent, task_count: int = 1) -> Optional[callable]:
@@ -626,6 +724,11 @@ def delegate_task(
     toolsets: Optional[List[str]] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_mode: Optional[str] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     parent_agent=None,
@@ -657,16 +760,6 @@ def delegate_task(
     default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     effective_max_iter = max_iterations or default_max_iter
 
-    # Resolve delegation credentials (provider:model pair).
-    # When delegation.provider is configured, this resolves the full credential
-    # bundle (base_url, api_key, api_mode) via the same runtime provider system
-    # used by CLI/gateway startup.  When unconfigured, returns None values so
-    # children inherit from the parent.
-    try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
-    except ValueError as exc:
-        return tool_error(str(exc))
-
     # Normalize to task list
     max_children = _get_max_concurrent_children()
     if tasks and isinstance(tasks, list):
@@ -680,7 +773,18 @@ def delegate_task(
             )
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "toolsets": toolsets}]
+        task_list = [{
+            "goal": goal,
+            "context": context,
+            "toolsets": toolsets,
+            "model": model,
+            "provider": provider,
+            "base_url": base_url,
+            "api_key": api_key,
+            "api_mode": api_mode,
+            "acp_command": acp_command,
+            "acp_args": acp_args,
+        }]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
 
@@ -711,15 +815,31 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            try:
+                target = _resolve_task_delegation_target(
+                    cfg,
+                    parent_agent,
+                    t,
+                    model=model,
+                    provider=provider,
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_mode=api_mode,
+                    acp_command=acp_command,
+                    acp_args=acp_args,
+                )
+            except ValueError as exc:
+                return tool_error(str(exc))
+
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
-                toolsets=t.get("toolsets") or toolsets, model=creds["model"],
+                toolsets=t.get("toolsets") or toolsets, model=target["model"],
                 max_iterations=effective_max_iter, parent_agent=parent_agent,
-                override_provider=creds["provider"], override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_acp_command=t.get("acp_command") or acp_command,
-                override_acp_args=t.get("acp_args") or acp_args,
+                override_provider=target["provider"], override_base_url=target["base_url"],
+                override_api_key=target["api_key"],
+                override_api_mode=target["api_mode"],
+                override_acp_command=target.get("command"),
+                override_acp_args=target.get("args"),
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -904,6 +1024,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     configured_provider = str(cfg.get("provider") or "").strip() or None
     configured_base_url = str(cfg.get("base_url") or "").strip() or None
     configured_api_key = str(cfg.get("api_key") or "").strip() or None
+    configured_api_mode = _coerce_api_mode(cfg.get("api_mode"))
 
     if configured_base_url:
         api_key = (
@@ -918,13 +1039,13 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
         base_lower = configured_base_url.lower()
         provider = "custom"
-        api_mode = "chat_completions"
+        api_mode = configured_api_mode or "chat_completions"
         if "chatgpt.com/backend-api/codex" in base_lower:
             provider = "openai-codex"
-            api_mode = "codex_responses"
+            api_mode = configured_api_mode or "codex_responses"
         elif "api.anthropic.com" in base_lower:
             provider = "anthropic"
-            api_mode = "anthropic_messages"
+            api_mode = configured_api_mode or "anthropic_messages"
 
         return {
             "model": configured_model,
@@ -932,6 +1053,8 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": configured_base_url,
             "api_key": api_key,
             "api_mode": api_mode,
+            "command": None,
+            "args": None,
         }
 
     if not configured_provider:
@@ -942,6 +1065,8 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": None,
             "api_key": None,
             "api_mode": None,
+            "command": None,
+            "args": None,
         }
 
     # Provider is configured — resolve full credentials
@@ -968,7 +1093,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "provider": runtime.get("provider"),
         "base_url": runtime.get("base_url"),
         "api_key": api_key,
-        "api_mode": runtime.get("api_mode"),
+        "api_mode": configured_api_mode or runtime.get("api_mode"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
     }
@@ -1059,6 +1184,41 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Override the child model for this delegation call. "
+                    "Useful for routing moderate work to gpt-5.4 and the "
+                    "hardest work to Claude Sonnet/Opus."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Optional provider override for this delegation call. "
+                    "If omitted, Hermes uses delegation config or inherits the parent."
+                ),
+            },
+            "base_url": {
+                "type": "string",
+                "description": (
+                    "Optional direct endpoint override for this delegation call. "
+                    "When set, Hermes routes the child to that OpenAI-compatible base URL."
+                ),
+            },
+            "api_key": {
+                "type": "string",
+                "description": (
+                    "Optional API key override paired with base_url/provider overrides."
+                ),
+            },
+            "api_mode": {
+                "type": "string",
+                "enum": ["chat_completions", "codex_responses", "anthropic_messages"],
+                "description": (
+                    "Optional API mode override for custom delegation targets."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -1070,6 +1230,27 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": f"Toolsets for this specific task. Available: {_TOOLSET_LIST_STR}. Use 'web' for network access, 'terminal' for shell, 'browser' for web interaction.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Per-task child model override.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Per-task provider override.",
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Per-task direct endpoint override.",
+                        },
+                        "api_key": {
+                            "type": "string",
+                            "description": "Per-task API key override for custom/provider routing.",
+                        },
+                        "api_mode": {
+                            "type": "string",
+                            "enum": ["chat_completions", "codex_responses", "anthropic_messages"],
+                            "description": "Per-task API mode override.",
                         },
                         "acp_command": {
                             "type": "string",
@@ -1135,6 +1316,11 @@ registry.register(
         toolsets=args.get("toolsets"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
+        model=args.get("model"),
+        provider=args.get("provider"),
+        base_url=args.get("base_url"),
+        api_key=args.get("api_key"),
+        api_mode=args.get("api_mode"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         parent_agent=kw.get("parent_agent")),
