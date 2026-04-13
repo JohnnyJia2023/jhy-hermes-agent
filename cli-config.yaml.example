@@ -744,10 +744,11 @@ code_execution:
 delegation:
   max_iterations: 50                          # Max tool-calling turns per child (default: 50)
   default_toolsets: ["terminal", "file", "web"]  # Default toolsets for subagents
-  # model: "google/gemini-3-flash-preview"    # Override model for subagents (empty = inherit parent)
-  # provider: "openrouter"                    # Override provider for subagents (empty = inherit parent)
+  # model: "gpt-5.4"                          # Default delegated child tier (empty = inherit parent)
+  # provider: "copilot"                      # Override provider for subagents (empty = inherit parent)
   #                                           # Resolves full credentials (base_url, api_key) automatically.
-  #                                           # Supported: openrouter, nous, zai, kimi-coding, minimax
+  #                                           # Supported: openrouter, nous, copilot, copilot-acp, zai, kimi-coding, minimax
+  #                                           # Per-call/per-task delegate_task(model=...) overrides still take precedence.
 
 # =============================================================================
 # Honcho Integration (Cross-Session User Modeling)

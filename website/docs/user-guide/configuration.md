@@ -1250,8 +1250,8 @@ Configure subagent behavior for the delegate tool:
 
 ```yaml
 delegation:
-  # model: "google/gemini-3-flash-preview"  # Override model (empty = inherit parent)
-  # provider: "openrouter"                  # Override provider (empty = inherit parent)
+  # model: "gpt-5.4"                        # Default delegated child model (empty = inherit parent)
+  # provider: "copilot"                    # Default delegated provider (empty = inherit parent)
   # base_url: "http://localhost:1234/v1"    # Direct OpenAI-compatible endpoint (takes precedence over provider)
   # api_key: "local-key"                    # API key for base_url (falls back to OPENAI_API_KEY)
 ```
@@ -1260,9 +1260,11 @@ delegation:
 
 **Direct endpoint override:** If you want the obvious custom-endpoint path, set `delegation.base_url`, `delegation.api_key`, and `delegation.model`. That sends subagents directly to that OpenAI-compatible endpoint and takes precedence over `delegation.provider`. If `delegation.api_key` is omitted, Hermes falls back to `OPENAI_API_KEY` only.
 
-The delegation provider uses the same credential resolution as CLI/gateway startup. All configured providers are supported: `openrouter`, `nous`, `copilot`, `zai`, `kimi-coding`, `minimax`, `minimax-cn`. When a provider is set, the system automatically resolves the correct base URL, API key, and API mode — no manual credential wiring needed.
+**Per-call / per-task override:** The `delegate_task(...)` tool can also override `model`, `provider`, `base_url`, `api_key`, and `api_mode` at runtime. Per-task values inside `tasks=[...]` take highest priority, then top-level `delegate_task(...)` arguments, then `delegation.*` in config, then parent inheritance.
 
-**Precedence:** `delegation.base_url` in config → `delegation.provider` in config → parent provider (inherited). `delegation.model` in config → parent model (inherited). Setting just `model` without `provider` changes only the model name while keeping the parent's credentials (useful for switching models within the same provider like OpenRouter).
+The delegation provider uses the same credential resolution as CLI/gateway startup. All configured providers are supported: `openrouter`, `nous`, `copilot`, `copilot-acp`, `zai`, `kimi-coding`, `minimax`, `minimax-cn`. When a provider is set, the system automatically resolves the correct base URL, API key, and API mode — no manual credential wiring needed.
+
+**Precedence:** task `base_url`/`provider` → top-level `delegate_task(...)` `base_url`/`provider` → `delegation.base_url`/`delegation.provider` in config → parent provider (inherited). Task `model` → top-level `delegate_task(...)` `model` → `delegation.model` in config → parent model (inherited). Setting just `model` without `provider` changes only the model name while keeping the inherited credentials (useful for switching models within the same provider like Copilot or OpenRouter).
 
 ## Clarify
 
