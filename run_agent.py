@@ -2151,6 +2151,59 @@ class AIAgent:
 
         return not self._has_natural_response_ending(visible_text)
 
+    def _fallback_from_recent_tool_results(self, messages: List[Dict[str, Any]]) -> Optional[str]:
+        """Best-effort fallback text from recent tool outputs when model returns empty."""
+        if not messages:
+            return None
+
+        call_id_to_name: Dict[str, str] = {}
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                call_id = tc.get("call_id") or tc.get("id")
+                fn = (tc.get("function") or {}).get("name")
+                if call_id and fn:
+                    call_id_to_name[call_id] = fn
+
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or msg.get("role") != "tool":
+                continue
+
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+
+            tool_name = call_id_to_name.get(msg.get("tool_call_id", ""), "")
+
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                parsed = None
+
+            if tool_name == "delegate_task" and isinstance(parsed, dict):
+                results = parsed.get("results")
+                if isinstance(results, list):
+                    for item in results:
+                        if isinstance(item, dict):
+                            summary = (item.get("summary") or "").strip()
+                            if summary:
+                                return summary[:2000]
+
+            if isinstance(parsed, dict):
+                for key in ("summary", "result", "output", "message"):
+                    value = parsed.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()[:1200]
+
+            raw = content.strip()
+            if raw:
+                return raw[:1200]
+
+        return None
+
     def _looks_like_codex_intermediate_ack(
         self,
         user_message: str,
@@ -10967,6 +11020,21 @@ class AIAgent:
                         # fallback configured).  Fall through to the
                         # "(empty)" terminal.
                         _turn_exit_reason = "empty_response_exhausted"
+
+                        # ── Last-resort: salvage from recent tool output ──
+                        # If the model produced tool calls but an empty final
+                        # response, surface the most recent tool result so the
+                        # user gets something useful instead of "(empty)".
+                        tool_fallback = self._fallback_from_recent_tool_results(messages)
+                        if tool_fallback:
+                            logger.debug("Empty assistant content — using recent tool output fallback")
+                            assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
+                            assistant_msg["content"] = tool_fallback
+                            messages.append(assistant_msg)
+                            final_response = tool_fallback
+                            break
+
+                        # Fall through to "(empty)" terminal if no fallback exists.
                         reasoning_text = self._extract_reasoning(assistant_message)
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         assistant_msg["content"] = "(empty)"

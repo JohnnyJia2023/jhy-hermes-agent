@@ -2120,6 +2120,37 @@ class TestRunConversation:
         assert result["final_response"] == "Fresh partial content from this turn"
         assert result["api_calls"] == 1
 
+    def test_empty_post_tool_response_uses_delegate_summary_fallback(self, agent):
+        """If model returns empty after delegate_task, surface tool summary instead of '(empty)'."""
+        self._setup_agent(agent)
+        agent.valid_tool_names = {"delegate_task"}
+        tc = _mock_tool_call(name="delegate_task", arguments="{}", call_id="delegate-1")
+        tool_turn = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        empty_followup = _mock_response(content=None, finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [tool_turn, empty_followup]
+
+        delegate_result = json.dumps({
+            "results": [
+                {
+                    "task_index": 0,
+                    "status": "completed",
+                    "summary": "Top 3 stories: A, B, C",
+                }
+            ]
+        })
+
+        with (
+            patch("tools.delegate_tool.delegate_task", return_value=delegate_result),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("find top stories")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Top 3 stories: A, B, C"
+        assert result["api_calls"] == 2
+
     def test_nous_401_refreshes_after_remint_and_retries(self, agent):
         self._setup_agent(agent)
         agent.provider = "nous"
