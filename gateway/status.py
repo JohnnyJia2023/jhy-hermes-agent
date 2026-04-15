@@ -223,6 +223,7 @@ def write_runtime_status(
     exit_reason: Any = _UNSET,
     restart_requested: Any = _UNSET,
     active_agents: Any = _UNSET,
+    platforms_snapshot: Optional[dict[str, Any]] = None,
     platform: Any = _UNSET,
     platform_state: Any = _UNSET,
     error_code: Any = _UNSET,
@@ -245,6 +246,11 @@ def write_runtime_status(
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = max(0, int(active_agents))
+    if platforms_snapshot is not None:
+        payload["platforms"] = {
+            str(name): dict(details) if isinstance(details, dict) else {}
+            for name, details in platforms_snapshot.items()
+        }
 
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})

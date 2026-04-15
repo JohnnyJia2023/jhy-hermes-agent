@@ -2121,13 +2121,26 @@ class TestRunConversation:
         assert result["api_calls"] == 1
 
     def test_empty_post_tool_response_uses_delegate_summary_fallback(self, agent):
-        """If model returns empty after delegate_task, surface tool summary instead of '(empty)'."""
+        """If model returns empty after delegate_task, surface tool summary instead of '(empty)'.
+        
+        v0.9.0 note: upstream added a 3-retry loop before the tool-output fallback fires.
+        The mock must provide enough empty responses to exhaust the retries (3 retries =
+        4 empty responses total: 1 original + 3 retries), then our _fallback_from_recent_tool_results
+        kicks in and surfaces the delegate summary.
+        """
         self._setup_agent(agent)
         agent.valid_tool_names = {"delegate_task"}
         tc = _mock_tool_call(name="delegate_task", arguments="{}", call_id="delegate-1")
         tool_turn = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
         empty_followup = _mock_response(content=None, finish_reason="stop")
-        agent.client.chat.completions.create.side_effect = [tool_turn, empty_followup]
+        # 1 tool_turn + 4 empty responses (1 original + 3 retries before fallback fires)
+        agent.client.chat.completions.create.side_effect = [
+            tool_turn,
+            empty_followup,
+            empty_followup,
+            empty_followup,
+            empty_followup,
+        ]
 
         delegate_result = json.dumps({
             "results": [
@@ -2149,7 +2162,7 @@ class TestRunConversation:
 
         assert result["completed"] is True
         assert result["final_response"] == "Top 3 stories: A, B, C"
-        assert result["api_calls"] == 2
+        assert result["api_calls"] == 5
 
     def test_planning_without_tools_gets_nudge_and_continues(self, agent):
         """When model gives planning text with no tool calls, it gets one nudge to execute."""

@@ -66,6 +66,28 @@ class TestBuildChannelDirectoryWrites:
 
         assert result == previous
 
+    def test_omits_empty_session_only_platforms(self, tmp_path):
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "session_1": {
+                "origin": {
+                    "platform": "telegram",
+                    "chat_id": "12345",
+                    "chat_name": "Alice",
+                },
+                "chat_type": "dm",
+            }
+        }))
+        cache_file = tmp_path / "channel_directory.json"
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}), \
+             patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = build_channel_directory({})
+
+        assert set(result["platforms"]) == {"telegram"}
+        assert result["platforms"]["telegram"][0]["name"] == "Alice"
+
 
 class TestResolveChannelName:
     def _setup(self, tmp_path, platforms):

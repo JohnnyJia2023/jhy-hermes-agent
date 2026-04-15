@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -301,6 +302,15 @@ class CopilotACPClient:
         self._active_process: subprocess.Popen[str] | None = None
         self._active_process_lock = threading.Lock()
 
+    @staticmethod
+    def _close_stream(stream: Any) -> None:
+        close_fn = getattr(stream, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
+
     def close(self) -> None:
         proc: subprocess.Popen[str] | None
         with self._active_process_lock:
@@ -310,13 +320,46 @@ class CopilotACPClient:
         if proc is None:
             return
         try:
-            proc.terminate()
-            proc.wait(timeout=2)
-        except Exception:
+            process_group_id: int | None = None
+            if proc.poll() is None and os.name != "nt":
+                try:
+                    process_group_id = os.getpgid(proc.pid)
+                except Exception:
+                    process_group_id = None
+
+            if process_group_id is not None:
+                try:
+                    os.killpg(process_group_id, signal.SIGTERM)
+                except Exception:
+                    process_group_id = None
+
+            if process_group_id is None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
             try:
-                proc.kill()
+                proc.wait(timeout=2)
             except Exception:
-                pass
+                if process_group_id is not None:
+                    try:
+                        os.killpg(process_group_id, signal.SIGKILL)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+        finally:
+            self._close_stream(getattr(proc, "stdin", None))
+            self._close_stream(getattr(proc, "stdout", None))
+            self._close_stream(getattr(proc, "stderr", None))
 
     def _create_chat_completion(
         self,
@@ -380,14 +423,27 @@ class CopilotACPClient:
 
     def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
         try:
+            popen_kwargs: dict[str, Any] = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "bufsize": 1,
+                "cwd": self._acp_cwd,
+            }
+            if os.name == "nt":
+                create_new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                if create_new_group:
+                    popen_kwargs["creationflags"] = create_new_group
+            else:
+                # Copilot CLI spawns child processes. Launch ACP in its own
+                # session so close() can reap the whole tree, not just the
+                # top-level wrapper process.
+                popen_kwargs["start_new_session"] = True
+
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                cwd=self._acp_cwd,
+                **popen_kwargs,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(

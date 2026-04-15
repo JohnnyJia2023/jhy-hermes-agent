@@ -2267,6 +2267,8 @@ def _model_flow_copilot_acp(config, current_model=""):
     print("  GitHub Copilot ACP delegates Hermes turns to `copilot --acp`.")
     print("  Hermes currently starts its own ACP subprocess for each request.")
     print("  Hermes uses your selected model as a hint for the Copilot ACP session.")
+    print("  Use provider `copilot` for normal Hermes chat, gateway, and automation usage.")
+    print("  Reserve `copilot-acp` for ACP-specific local workflows and debugging.")
     print(f"  Command: {resolved_command}")
     print(f"  Backend marker: {effective_base}")
     print()
