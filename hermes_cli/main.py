@@ -3240,6 +3240,11 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     """
     if not (web_dir / "package.json").exists():
         return True
+    # Skip rebuild if the output already exists — avoids requiring tsc in PATH
+    # on systems where npm install puts it only in node_modules/.bin/.
+    dist_dir = web_dir.parent / "hermes_cli" / "web_dist"
+    if (dist_dir / "index.html").exists():
+        return True
     import shutil
     npm = shutil.which("npm")
     if not npm:
