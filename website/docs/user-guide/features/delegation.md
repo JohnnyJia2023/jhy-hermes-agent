@@ -14,30 +14,29 @@ The `delegate_task` tool spawns child AIAgent instances with isolated context, r
 delegate_task(
     goal="Debug why tests fail",
     context="Error: assertion in test_foo.py line 42",
-    toolsets=["terminal", "file"],
-    model="gpt-5.4"
+    toolsets=["terminal", "file"]
 )
 ```
 
 ## Parallel Batch
 
-Up to 3 concurrent subagents:
+Up to 3 concurrent subagents by default (configurable, no hard ceiling):
 
 ```python
 delegate_task(tasks=[
-    {"goal": "Research topic A", "toolsets": ["web"], "model": "gpt-5.4"},
-    {"goal": "Research topic B", "toolsets": ["web"], "model": "claude-sonnet-4.6"},
-    {"goal": "Fix the build", "toolsets": ["terminal", "file"], "model": "claude-opus-4.6"}
+    {"goal": "Research topic A", "toolsets": ["web"]},
+    {"goal": "Research topic B", "toolsets": ["web"]},
+    {"goal": "Fix the build", "toolsets": ["terminal", "file"]}
 ])
 ```
 
 ## How Subagent Context Works
 
 :::warning Critical: Subagents Know Nothing
-Subagents start with a **completely fresh conversation**. They have zero knowledge of the parent's conversation history, prior tool calls, or anything discussed before delegation. The subagent's only context comes from the `goal` and `context` fields you provide.
+Subagents start with a **completely fresh conversation**. They have zero knowledge of the parent's conversation history, prior tool calls, or anything discussed before delegation. The subagent's only context comes from the `goal` and `context` fields the parent agent populates when it calls `delegate_task`.
 :::
 
-This means you must pass **everything** the subagent needs:
+This means the parent agent must pass **everything** the subagent needs in the call:
 
 ```python
 # BAD - subagent has no idea what "the error" is
@@ -122,8 +121,8 @@ delegate_task(
 
 When you provide a `tasks` array, subagents run in **parallel** using a thread pool:
 
-- **Maximum concurrency:** 3 tasks (the `tasks` array is truncated to 3 if longer)
-- **Thread pool:** Uses `ThreadPoolExecutor` with `MAX_CONCURRENT_CHILDREN = 3` workers
+- **Maximum concurrency:** 5 tasks by default (configurable via `delegation.max_concurrent_children`, absolute cap of 8)
+- **Thread pool:** Uses `ThreadPoolExecutor` with the configured concurrency limit as max workers
 - **Progress display:** In CLI mode, a tree-view shows tool calls from each subagent in real-time with per-task completion lines. In gateway mode, progress is batched and relayed to the parent's progress callback
 - **Result ordering:** Results are sorted by task index to match input order regardless of completion order
 - **Interrupt propagation:** Interrupting the parent (e.g., sending a new message) interrupts all active children
@@ -132,51 +131,16 @@ Single-task delegation runs directly without thread pool overhead.
 
 ## Model Override
 
-You can route subagents to different models at three levels:
-
-1. `delegation.model` / `delegation.provider` in `config.yaml` for the default child tier
-2. top-level `model` / `provider` arguments on a single `delegate_task(...)` call
-3. per-task `model` / `provider` overrides inside `tasks=[...]`
-
-This is useful for an orchestrator pattern where a smaller primary model keeps control and escalates only the harder work.
-
-### Config-Level Default
-
-Useful when you want most delegated work to go to a fixed mid-tier model:
+You can configure a different model for subagents via `config.yaml` — useful for delegating simple tasks to cheaper/faster models:
 
 ```yaml
 # In ~/.hermes/config.yaml
 delegation:
-  model: "gpt-5.4"                    # Default child tier
-  provider: "copilot"                 # Optional: route subagents to a different provider
+  model: "google/gemini-flash-2.0"    # Cheaper model for subagents
+  provider: "openrouter"              # Optional: route subagents to a different provider
 ```
 
-### Per-Call Override
-
-Useful when one specific delegated task needs a stronger model than your default:
-
-```python
-delegate_task(
-    goal="Review the architecture decision and recommend a direction",
-    context="Compare the event-driven and request-driven designs in docs/adr-017.md",
-    toolsets=["file"],
-    model="claude-sonnet-4.6",
-)
-```
-
-### Per-Task Override in a Batch
-
-Useful when different parallel subtasks need different reasoning depth:
-
-```python
-delegate_task(tasks=[
-    {"goal": "Check the failing unit tests", "toolsets": ["terminal", "file"], "model": "gpt-5.4"},
-    {"goal": "Review the caching design", "toolsets": ["file"], "model": "claude-sonnet-4.6"},
-    {"goal": "Stress-test the migration plan", "toolsets": ["file"], "model": "claude-opus-4.6"},
-])
-```
-
-If omitted, subagents fall back to `delegation.model`/`delegation.provider` in config, then finally inherit the parent route.
+If omitted, subagents use the same model as the parent.
 
 ## Toolset Selection Tips
 
@@ -190,8 +154,8 @@ The `toolsets` parameter controls what tools the subagent has access to. Choose 
 | `["file"]` | Read-only analysis, code review without execution |
 | `["terminal"]` | System administration, process management |
 
-Certain toolsets are **always blocked** for subagents regardless of what you specify:
-- `delegation` — no recursive delegation (prevents infinite spawning)
+Certain toolsets are blocked for subagents regardless of what you specify:
+- `delegation` — blocked for leaf subagents (the default). Retained for `role="orchestrator"` children, bounded by `max_spawn_depth` — see [Depth Limit and Nested Orchestration](#depth-limit-and-nested-orchestration) below.
 - `clarify` — subagents cannot interact with the user
 - `memory` — no writes to shared persistent memory
 - `code_execution` — children should reason step-by-step
@@ -209,18 +173,34 @@ delegate_task(
 )
 ```
 
-## Depth Limit
+## Depth Limit and Nested Orchestration
 
-Delegation has a **depth limit of 2** — a parent (depth 0) can spawn children (depth 1), but children cannot delegate further. This prevents runaway recursive delegation chains.
+By default, delegation is **flat**: a parent (depth 0) spawns children (depth 1), and those children cannot delegate further. This prevents runaway recursive delegation.
+
+For multi-stage workflows (research → synthesis, or parallel orchestration over sub-problems), a parent can spawn **orchestrator** children that *can* delegate their own workers:
+
+```python
+delegate_task(
+    goal="Survey three code review approaches and recommend one",
+    role="orchestrator",  # Allows this child to spawn its own workers
+    context="...",
+)
+```
+
+- `role="leaf"` (default): child cannot delegate further — identical to the flat-delegation behavior.
+- `role="orchestrator"`: child retains the `delegation` toolset. Gated by `delegation.max_spawn_depth` (default **1** = flat, so `role="orchestrator"` is a no-op at defaults). Raise `max_spawn_depth` to 2 to allow orchestrator children to spawn leaf grandchildren; 3 for three levels (cap).
+- `delegation.orchestrator_enabled: false`: global kill switch that forces every child to `leaf` regardless of the `role` parameter.
+
+**Cost warning:** With `max_spawn_depth: 3` and `max_concurrent_children: 3`, the tree can reach 3×3×3 = 27 concurrent leaf agents. Each extra level multiplies spend — raise `max_spawn_depth` intentionally.
 
 ## Key Properties
 
 - Each subagent gets its **own terminal session** (separate from the parent)
-- **No nested delegation** — children cannot delegate further (no grandchildren)
-- Subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `execute_code`
-- **Interrupt propagation** — interrupting the parent interrupts all active children
+- **Nested delegation is opt-in** — only `role="orchestrator"` children can delegate further, and only when `max_spawn_depth` is raised from its default of 1 (flat). Disable globally with `orchestrator_enabled: false`.
+- Leaf subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `execute_code`. Orchestrator subagents retain `delegate_task` but still cannot use the other four.
+- **Interrupt propagation** — interrupting the parent interrupts all active children (including grandchildren under orchestrators)
 - Only the final summary enters the parent's context, keeping token usage efficient
-- Subagents inherit the parent's **API key, provider configuration, and credential pool** unless explicitly overridden (enabling key rotation on rate limits)
+- Subagents inherit the parent's **API key, provider configuration, and credential pool** (enabling key rotation on rate limits)
 
 ## Delegation vs execute_code
 
@@ -229,7 +209,7 @@ Delegation has a **depth limit of 2** — a parent (depth 0) can spawn children 
 | **Reasoning** | Full LLM reasoning loop | Just Python code execution |
 | **Context** | Fresh isolated conversation | No conversation, just script |
 | **Tool access** | All non-blocked tools with reasoning | 7 tools via RPC, no reasoning |
-| **Parallelism** | Up to 3 concurrent subagents | Single script |
+| **Parallelism** | 3 concurrent subagents by default (configurable) | Single script |
 | **Best for** | Complex tasks needing judgment | Mechanical multi-step pipelines |
 | **Token cost** | Higher (full LLM loop) | Lower (only stdout returned) |
 | **User interaction** | None (subagents can't clarify) | None |
@@ -242,9 +222,11 @@ Delegation has a **depth limit of 2** — a parent (depth 0) can spawn children 
 # In ~/.hermes/config.yaml
 delegation:
   max_iterations: 50                        # Max turns per child (default: 50)
-  default_toolsets: ["terminal", "file", "web"]  # Default toolsets
-  model: "gpt-5.4"                         # Optional default delegated model
-  provider: "copilot"                      # Optional built-in provider
+  # max_concurrent_children: 3              # Parallel children per batch (default: 3)
+  # max_spawn_depth: 1                      # Tree depth (1-3, default 1 = flat). Raise to 2 to allow orchestrator children to spawn leaves; 3 for three levels.
+  # orchestrator_enabled: true              # Disable to force all children to leaf role.
+  model: "google/gemini-3-flash-preview"             # Optional provider/model override
+  provider: "openrouter"                             # Optional built-in provider
 
 # Or use a direct custom endpoint instead of provider:
 delegation:
@@ -253,8 +235,6 @@ delegation:
   api_key: "local-key"
 ```
 
-`copilot-acp` is also supported as a delegation provider when you want child agents to use ACP transport instead of the Copilot HTTP API.
-
 :::tip
-The agent can handle delegation automatically based on task complexity, but you can still explicitly steer the delegated tier with `model` when you want a predictable ladder such as `gpt-5.4-mini -> gpt-5.4 -> claude-sonnet-4.6 -> claude-opus-4.6`.
+The agent handles delegation automatically based on the task complexity. You don't need to explicitly ask it to delegate — it will do so when it makes sense.
 :::
