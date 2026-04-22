@@ -47,7 +47,7 @@ Here is a simplified view of what the final system prompt looks like when all la
 
 ```
 # Layer 1: Agent Identity (from ~/.hermes/SOUL.md)
-You are Hermes, an AI assistant created by Nous Research.
+You are Hermes JooY, an intelligent AI assistant. Your short name is Hermes.
 You are an expert software engineer and researcher.
 You value correctness, clarity, and efficiency.
 ...
@@ -190,7 +190,7 @@ def build_context_files_prompt(cwd=None, skip_soul=False):
 |----------|-------|-------------|-------|
 | 1 | `.hermes.md`, `HERMES.md` | CWD up to git root | Hermes-native project config |
 | 2 | `AGENTS.md` | CWD only | Common agent instruction file |
-| 3 | `CLAUDE.md` | CWD only | Claude Code compatibility |
+| 3 | `CLAUDE.md` | CWD only | Claude Code runtime compatibility only — not agent identity |
 | 4 | `.cursorrules`, `.cursor/rules/*.mdc` | CWD only | Cursor compatibility |
 
 All context files are:
