@@ -1055,6 +1055,97 @@ class TestAuxiliaryTaskExtraBody:
         assert not any("OPENAI_BASE_URL is set" in rec.message for rec in caplog.records), \
             "Should NOT warn when OPENAI_BASE_URL is not set"
 
+
+class TestVisionAutoFallbackOnTimeout:
+    """Vision auto-routing should still use provider fallback on timeouts."""
+
+    @staticmethod
+    def _mock_response(text: str):
+        response = MagicMock()
+        choice = MagicMock()
+        choice.message.content = text
+        response.choices = [choice]
+        return response
+
+    def test_call_llm_auto_vision_timeout_uses_fallback(self):
+        primary_client = MagicMock()
+        primary_client.base_url = "https://api.openrouter.ai/v1"
+        primary_client.chat.completions.create.side_effect = Exception("Request timed out.")
+
+        fallback_response = self._mock_response("fallback analysis")
+        fallback_client = MagicMock()
+        fallback_client.base_url = "https://api.nousresearch.com/v1"
+        fallback_client.chat.completions.create.return_value = fallback_response
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=("auto", "vision-model", None, None, None),
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_vision_provider_client",
+                return_value=("openrouter", primary_client, "vision-model"),
+            ),
+            patch(
+                "agent.auxiliary_client._try_payment_fallback",
+                return_value=(fallback_client, "fallback-model", "nous"),
+            ) as mock_fallback,
+        ):
+            result = call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "hello"}],
+                timeout=60,
+            )
+
+        assert result is fallback_response
+        mock_fallback.assert_called_once()
+        fallback_client.chat.completions.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_call_llm_auto_vision_timeout_uses_fallback(self):
+        primary_client = MagicMock()
+        primary_client.base_url = "https://api.openrouter.ai/v1"
+        primary_client.chat.completions.create = AsyncMock(
+            side_effect=Exception("Request timed out.")
+        )
+
+        fallback_response = self._mock_response("fallback analysis")
+        fallback_sync_client = MagicMock()
+        fallback_sync_client.base_url = "https://api.nousresearch.com/v1"
+        async_fallback_client = MagicMock()
+        async_fallback_client.chat.completions.create = AsyncMock(
+            return_value=fallback_response
+        )
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=("auto", "vision-model", None, None, None),
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_vision_provider_client",
+                return_value=("openrouter", primary_client, "vision-model"),
+            ),
+            patch(
+                "agent.auxiliary_client._try_payment_fallback",
+                return_value=(fallback_sync_client, "fallback-model", "nous"),
+            ) as mock_fallback,
+            patch(
+                "agent.auxiliary_client._to_async_client",
+                return_value=(async_fallback_client, "fallback-model"),
+            ) as mock_to_async,
+        ):
+            result = await async_call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "hello"}],
+                timeout=60,
+            )
+
+        assert result is fallback_response
+        mock_fallback.assert_called_once()
+        mock_to_async.assert_called_once()
+        async_fallback_client.chat.completions.create.assert_awaited_once()
+
 # ---------------------------------------------------------------------------
 # Anthropic-compatible image block conversion
 # ---------------------------------------------------------------------------

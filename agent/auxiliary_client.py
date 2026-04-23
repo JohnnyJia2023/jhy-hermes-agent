@@ -1304,6 +1304,26 @@ def _is_auth_error(exc: Exception) -> bool:
     return "error code: 401" in err_lower or "authenticationerror" in type(exc).__name__.lower()
 
 
+
+
+def _is_model_not_supported_error(exc: Exception) -> bool:
+    """Detect model-not-supported errors that warrant provider fallback.
+
+    Returns True for 400 errors where the provider rejects the specific
+    model (e.g. Copilot's Responses API rejecting gpt-5.4-mini for vision).
+    These should trigger the auto-fallback chain the same way connection
+    errors do.
+    """
+    status = getattr(exc, "status_code", None)
+    if status == 400:
+        body = getattr(exc, "body", None) or {}
+        if isinstance(body, dict):
+            error = body.get("error", {}) or {}
+            if isinstance(error, dict) and error.get("code") == "model_not_supported":
+                return True
+    err_lower = str(exc).lower()
+    return "model_not_supported" in err_lower or "the requested model is not supported" in err_lower
+
 def _try_payment_fallback(
     failed_provider: str,
     task: str = None,
@@ -1793,6 +1813,9 @@ def resolve_provider_client(
         # API — they are not accessible via /chat/completions.  Wrap the
         # plain client in CodexAuxiliaryClient so call_llm() transparently
         # routes through responses.stream().
+        # Skip wrapping when api_mode is explicitly 'chat_completions' —
+        # vision tasks need /chat/completions because the Copilot Responses
+        # API does not support image/multimodal input.
         if provider == "copilot" and final_model and not raw_codex:
             try:
                 from hermes_cli.models import _should_use_copilot_responses_api
@@ -2728,6 +2751,7 @@ def call_llm(
     """
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
+    requested_provider = resolved_provider
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
 
@@ -2866,11 +2890,14 @@ def call_llm(
         # Codex/OAuth tokens that authenticate but whose endpoint is down,
         # and providers the user never configured that got picked up by
         # the auto-detection chain.
-        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
+        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err) or _is_model_not_supported_error(first_err)
         # Only try alternative providers when the user didn't explicitly
         # configure this task's provider.  Explicit provider = hard constraint;
         # auto (the default) = best-effort fallback chain.  (#7559)
-        is_auto = resolved_provider in ("auto", "", None)
+        # Only the originally requested provider determines whether this
+        # call is still considered auto-routed. Vision auto-selection rewrites
+        # `resolved_provider` to the concrete backend for logging/kwargs.
+        is_auto = requested_provider in ("auto", "", None)
         if should_fallback and is_auto:
             reason = "payment error" if _is_payment_error(first_err) else "connection error"
             logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
@@ -2965,6 +2992,7 @@ async def async_call_llm(
     """
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
+    requested_provider = resolved_provider
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
 
@@ -3075,8 +3103,11 @@ async def async_call_llm(
                     await refreshed_client.chat.completions.create(**kwargs), task)
 
         # ── Payment / connection fallback (mirrors sync call_llm) ─────
-        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
-        is_auto = resolved_provider in ("auto", "", None)
+        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err) or _is_model_not_supported_error(first_err)
+        # Only the originally requested provider determines whether this
+        # call is still considered auto-routed. Vision auto-selection rewrites
+        # `resolved_provider` to the concrete backend for logging/kwargs.
+        is_auto = requested_provider in ("auto", "", None)
         if should_fallback and is_auto:
             reason = "payment error" if _is_payment_error(first_err) else "connection error"
             logger.info("Auxiliary %s (async): %s on %s (%s), trying fallback",
