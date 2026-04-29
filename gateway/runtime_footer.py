@@ -54,6 +54,19 @@ def _model_short(model: Optional[str]) -> str:
     return model.rsplit("/", 1)[-1]
 
 
+def _model_label(provider: Optional[str], model: Optional[str]) -> str:
+    """Return a compact provider/model label for runtime headers."""
+    m = str(model or "").strip()
+    if not m:
+        return ""
+    p = str(provider or "").strip()
+    if not p:
+        return m
+    if m.startswith(p + "/"):
+        return m
+    return f"{p}/{m}"
+
+
 def resolve_footer_config(
     user_config: dict[str, Any] | None,
     platform_key: str | None = None,
@@ -65,7 +78,12 @@ def resolve_footer_config(
         2. ``display.runtime_footer``
         3. ``display.platforms.<platform_key>.runtime_footer``
     """
-    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS)}
+    resolved = {
+        "enabled": False,
+        "fields": list(_DEFAULT_FIELDS),
+        "position": "footer",
+        "style": "compact",
+    }
     cfg = (user_config or {}).get("display") or {}
 
     global_cfg = cfg.get("runtime_footer")
@@ -74,6 +92,10 @@ def resolve_footer_config(
             resolved["enabled"] = bool(global_cfg.get("enabled"))
         if isinstance(global_cfg.get("fields"), list) and global_cfg["fields"]:
             resolved["fields"] = [str(f) for f in global_cfg["fields"]]
+        if str(global_cfg.get("position") or "").lower() in ("header", "footer"):
+            resolved["position"] = str(global_cfg.get("position")).lower()
+        if str(global_cfg.get("style") or "").lower() in ("compact", "header"):
+            resolved["style"] = str(global_cfg.get("style")).lower()
 
     if platform_key:
         platforms = cfg.get("platforms") or {}
@@ -85,6 +107,10 @@ def resolve_footer_config(
                     resolved["enabled"] = bool(plat_footer.get("enabled"))
                 if isinstance(plat_footer.get("fields"), list) and plat_footer["fields"]:
                     resolved["fields"] = [str(f) for f in plat_footer["fields"]]
+                if str(plat_footer.get("position") or "").lower() in ("header", "footer"):
+                    resolved["position"] = str(plat_footer.get("position")).lower()
+                if str(plat_footer.get("style") or "").lower() in ("compact", "header"):
+                    resolved["style"] = str(plat_footer.get("style")).lower()
 
     return resolved
 
@@ -92,16 +118,32 @@ def resolve_footer_config(
 def format_runtime_footer(
     *,
     model: Optional[str],
+    provider: Optional[str] = None,
     context_tokens: int,
     context_length: Optional[int],
+    total_tokens: Optional[int] = None,
     cwd: Optional[str] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
+    style: str = "compact",
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
 
     Fields are skipped silently when their underlying data is missing — a
     partially-populated footer is better than a line with ``?%`` or empty slots.
     """
+    style = (style or "compact").lower()
+    if style == "header":
+        parts: list[str] = []
+        if "model" in fields:
+            label = _model_label(provider, model)
+            if label:
+                parts.append(f"M: {label}")
+        if "total_tokens" in fields or "tokens" in fields:
+            token_count = total_tokens if total_tokens is not None else context_tokens
+            if token_count and token_count > 0:
+                parts.append(f"T: ~{int(token_count)}")
+        return " | ".join(parts)
+
     parts: list[str] = []
     for field in fields:
         if field == "model":
@@ -116,6 +158,10 @@ def format_runtime_footer(
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:
                 parts.append(rel)
+        elif field in ("total_tokens", "tokens"):
+            token_count = total_tokens if total_tokens is not None else context_tokens
+            if token_count and token_count > 0:
+                parts.append(f"~{int(token_count)} tokens")
         # Unknown field names are silently ignored.
 
     if not parts:
@@ -128,8 +174,10 @@ def build_footer_line(
     user_config: dict[str, Any] | None,
     platform_key: str | None,
     model: Optional[str],
+    provider: Optional[str] = None,
     context_tokens: int,
     context_length: Optional[int],
+    total_tokens: Optional[int] = None,
     cwd: Optional[str] = None,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
@@ -138,13 +186,41 @@ def build_footer_line(
     append this to the final response themselves, preserving a single blank
     line of separation.
     """
-    cfg = resolve_footer_config(user_config, platform_key)
-    if not cfg.get("enabled"):
-        return ""
-    return format_runtime_footer(
+    return build_footer_payload(
+        user_config=user_config,
+        platform_key=platform_key,
         model=model,
+        provider=provider,
         context_tokens=context_tokens,
         context_length=context_length,
+        total_tokens=total_tokens,
+        cwd=cwd,
+    )["line"]
+
+
+def build_footer_payload(
+    *,
+    user_config: dict[str, Any] | None,
+    platform_key: str | None,
+    model: Optional[str],
+    provider: Optional[str] = None,
+    context_tokens: int,
+    context_length: Optional[int],
+    total_tokens: Optional[int] = None,
+    cwd: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return rendered runtime metadata plus placement information."""
+    cfg = resolve_footer_config(user_config, platform_key)
+    if not cfg.get("enabled"):
+        return {"line": "", "position": cfg.get("position", "footer")}
+    line = format_runtime_footer(
+        model=model,
+        provider=provider,
+        context_tokens=context_tokens,
+        context_length=context_length,
+        total_tokens=total_tokens,
         cwd=cwd,
         fields=cfg.get("fields") or _DEFAULT_FIELDS,
+        style=str(cfg.get("style") or "compact"),
     )
+    return {"line": line, "position": cfg.get("position", "footer")}

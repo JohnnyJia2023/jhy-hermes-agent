@@ -5309,21 +5309,32 @@ class GatewayRunner:
             # streaming already delivered the body, we can't mutate the sent
             # text, so we fire a separate trailing send below.
             _footer_line = ""
+            _footer_position = "footer"
             try:
-                from gateway.runtime_footer import build_footer_line as _bfl
-                _footer_line = _bfl(
+                from gateway.runtime_footer import build_footer_payload as _bfp
+                _footer_payload = _bfp(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
                     model=agent_result.get("model"),
+                    provider=agent_result.get("provider"),
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
+                    total_tokens=(
+                        (agent_result.get("input_tokens", 0) or 0)
+                        + (agent_result.get("output_tokens", 0) or 0)
+                    ),
                     cwd=os.environ.get("TERMINAL_CWD", ""),
                 )
+                _footer_line = str(_footer_payload.get("line") or "")
+                _footer_position = str(_footer_payload.get("position") or "footer")
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
                 _footer_line = ""
             if _footer_line and response and not agent_result.get("already_sent"):
-                response = f"{response}\n\n{_footer_line}"
+                if _footer_position == "header":
+                    response = f"{_footer_line}\n{response}"
+                else:
+                    response = f"{response}\n\n{_footer_line}"
 
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
@@ -11058,6 +11069,7 @@ class GatewayRunner:
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
+                    "provider": getattr(_agent, "provider", None) if _agent else None,
                     "context_length": _context_length,
                 }
             
@@ -11163,6 +11175,7 @@ class GatewayRunner:
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
                 "model": _resolved_model,
+                "provider": getattr(agent, "provider", None) if agent else None,
                 "context_length": _context_length,
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),

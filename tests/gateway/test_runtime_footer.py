@@ -10,6 +10,7 @@ import pytest
 from gateway.runtime_footer import (
     _home_relative_cwd,
     _model_short,
+    build_footer_payload,
     build_footer_line,
     format_runtime_footer,
     resolve_footer_config,
@@ -147,20 +148,40 @@ def test_format_footer_unknown_field_silently_ignored():
     assert out == "gpt-5.4 · 50%"
 
 
+def test_format_header_style_model_and_tokens():
+    out = format_runtime_footer(
+        provider="minimax",
+        model="MiniMax-M2.7",
+        context_tokens=50,
+        context_length=204800,
+        total_tokens=80,
+        fields=("model", "total_tokens"),
+        style="header",
+    )
+    assert out == "M: minimax/MiniMax-M2.7 | T: ~80"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------
 
 def test_resolve_defaults_off_empty_config():
     cfg = resolve_footer_config({}, "telegram")
-    assert cfg == {"enabled": False, "fields": ["model", "context_pct", "cwd"]}
+    assert cfg == {
+        "enabled": False,
+        "fields": ["model", "context_pct", "cwd"],
+        "position": "footer",
+        "style": "compact",
+    }
 
 
 def test_resolve_global_enable():
-    user = {"display": {"runtime_footer": {"enabled": True}}}
+    user = {"display": {"runtime_footer": {"enabled": True, "position": "header", "style": "header"}}}
     cfg = resolve_footer_config(user, "telegram")
     assert cfg["enabled"] is True
     assert cfg["fields"] == ["model", "context_pct", "cwd"]
+    assert cfg["position"] == "header"
+    assert cfg["style"] == "header"
 
 
 def test_resolve_platform_override_wins():
@@ -260,3 +281,26 @@ def test_build_footer_no_data_returns_empty_even_when_enabled():
     # With no TERMINAL_CWD env either
     if not os.environ.get("TERMINAL_CWD"):
         assert out == ""
+
+
+def test_build_footer_payload_header_position():
+    payload = build_footer_payload(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "position": "header",
+                    "style": "header",
+                    "fields": ["model", "total_tokens"],
+                }
+            }
+        },
+        platform_key="telegram",
+        provider="minimax",
+        model="MiniMax-M2.7",
+        context_tokens=10,
+        context_length=204800,
+        total_tokens=80,
+        cwd="",
+    )
+    assert payload == {"line": "M: minimax/MiniMax-M2.7 | T: ~80", "position": "header"}
