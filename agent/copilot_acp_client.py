@@ -23,13 +23,29 @@ from types import SimpleNamespace
 from typing import Any
 
 from agent.file_safety import get_read_block_error, is_write_denied
-from agent.redact import redact_sensitive_text
+from agent.redact import mask_secret, redact_sensitive_text
 
 ACP_MARKER_BASE_URL = "acp://copilot"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 _TOOL_CALL_JSON_RE = re.compile(r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}", re.DOTALL)
+_ACP_SECRET_ASSIGNMENT_RE = re.compile(
+    r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})\s*=\s*(['\"]?)(\S+)\2",
+    re.IGNORECASE,
+)
+_ACP_SECRET_PREFIX_RE = re.compile(
+    r"\b("
+    r"sk-[A-Za-z0-9_-]{10,}|"
+    r"ghp_[A-Za-z0-9]{10,}|"
+    r"github_pat_[A-Za-z0-9_]{10,}|"
+    r"gh[ousr]_[A-Za-z0-9]{10,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"AIza[A-Za-z0-9_-]{30,}|"
+    r"hf_[A-Za-z0-9]{10,}|"
+    r"gsk_[A-Za-z0-9]{10,}"
+    r")\b"
+)
 
 
 def _resolve_command() -> str:
@@ -45,6 +61,59 @@ def _resolve_args() -> list[str]:
     if not raw:
         return ["--acp", "--stdio"]
     return shlex.split(raw)
+
+
+def _resolve_home_dir() -> str:
+    """Return a stable HOME for child ACP processes."""
+
+    try:
+        from hermes_constants import get_subprocess_home
+
+        profile_home = get_subprocess_home()
+        if profile_home:
+            return profile_home
+    except Exception:
+        pass
+
+    home = os.environ.get("HOME", "").strip()
+    if home:
+        return home
+
+    expanded = os.path.expanduser("~")
+    if expanded and expanded != "~":
+        return expanded
+
+    try:
+        import pwd
+
+        resolved = pwd.getpwuid(os.getuid()).pw_dir.strip()
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+
+    # Last resort: /tmp (writable on any POSIX system). Avoids crashing the
+    # subprocess with no HOME; callers can set HERMES_HOME explicitly if they
+    # need a different writable dir.
+    return "/tmp"
+
+
+def _build_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = _resolve_home_dir()
+    return env
+
+
+def _redact_file_content_for_acp(content: str) -> str:
+    """Always redact obvious secrets before returning file contents to ACP."""
+    redacted = redact_sensitive_text(content)
+
+    def _redact_assignment(match: re.Match[str]) -> str:
+        name, quote, value = match.group(1), match.group(2), match.group(3)
+        return f"{name}={quote}{mask_secret(value)}{quote}"
+
+    redacted = _ACP_SECRET_ASSIGNMENT_RE.sub(_redact_assignment, redacted)
+    return _ACP_SECRET_PREFIX_RE.sub(lambda match: mask_secret(match.group(1)), redacted)
 
 
 def _jsonrpc_error(message_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -455,6 +524,7 @@ class CopilotACPClient:
                 # session so close() can reap the whole tree, not just the
                 # top-level wrapper process.
                 popen_kwargs["start_new_session"] = True
+            popen_kwargs["env"] = _build_subprocess_env()
 
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args,
@@ -643,7 +713,7 @@ class CopilotACPClient:
                     end = start + limit if isinstance(limit, int) and limit > 0 else None
                     content = "".join(lines[start:end])
                 if content:
-                    content = redact_sensitive_text(content)
+                    content = _redact_file_content_for_acp(content)
                 response = {
                     "jsonrpc": "2.0",
                     "id": message_id,
