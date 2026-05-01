@@ -106,7 +106,7 @@ def _build_subprocess_env() -> dict[str, str]:
 
 def _redact_file_content_for_acp(content: str) -> str:
     """Always redact obvious secrets before returning file contents to ACP."""
-    redacted = redact_sensitive_text(content)
+    redacted = redact_sensitive_text(content, force=True)
 
     def _redact_assignment(match: re.Match[str]) -> str:
         name, quote, value = match.group(1), match.group(2), match.group(3)
