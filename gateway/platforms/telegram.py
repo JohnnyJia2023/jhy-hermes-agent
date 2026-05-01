@@ -2720,6 +2720,53 @@ class TelegramAdapter(BasePlatformAdapter):
                         return True
         return False
 
+    def _message_directly_addresses_other_bot(self, message: Message) -> bool:
+        """Return True when a group message is explicitly addressed elsewhere.
+
+        Telegram groups can host multiple automation bots.  If a message starts
+        with ``@other_bot`` or uses ``/command@other_bot``, it is for that bot,
+        even when it is a reply to one of our messages or the chat allows free
+        responses.  Dropping these early keeps peer bots from accidentally
+        driving this agent's tools.
+        """
+        bot_username = self._known_bot_username()
+        if not bot_username:
+            return False
+        expected = f"@{bot_username}"
+
+        def _iter_sources():
+            yield getattr(message, "text", None) or "", getattr(message, "entities", None) or []
+            yield getattr(message, "caption", None) or "", getattr(message, "caption_entities", None) or []
+
+        for source_text, entities in _iter_sources():
+            first_non_ws = len(source_text) - len(source_text.lstrip())
+            for entity in entities:
+                entity_type = str(getattr(entity, "type", "")).split(".")[-1].lower()
+                offset = int(getattr(entity, "offset", -1))
+                length = int(getattr(entity, "length", 0))
+                if offset < 0 or length <= 0:
+                    continue
+                entity_text = source_text[offset:offset + length].strip().lower()
+
+                if entity_type == "bot_command":
+                    at_index = entity_text.find("@")
+                    if at_index < 0:
+                        continue
+                    target = entity_text[at_index:]
+                    if target != expected:
+                        return True
+                    continue
+
+                if entity_type != "mention":
+                    continue
+                if offset != first_non_ws:
+                    continue
+                if not entity_text.endswith("bot"):
+                    continue
+                if entity_text != expected:
+                    return True
+        return False
+
     def _message_matches_mention_patterns(self, message: Message) -> bool:
         if not self._mention_patterns:
             return False
@@ -2767,6 +2814,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     return False
             except (TypeError, ValueError):
                 logger.warning("[%s] Ignoring non-numeric Telegram message_thread_id: %r", self.name, thread_id)
+        if self._message_directly_addresses_other_bot(message):
+            return False
         if str(getattr(getattr(message, "chat", None), "id", "")) in self._telegram_free_response_chats():
             return True
         if not self._telegram_require_mention():

@@ -96,6 +96,52 @@ def _bot_command_entity(text, command):
     return SimpleNamespace(type="bot_command", offset=offset, length=len(command))
 
 
+def test_group_messages_drop_leading_mentions_for_other_bots_even_when_replying():
+    adapter = _make_adapter(require_mention=True)
+
+    assert adapter._should_process_message(
+        _group_message(
+            "@other_bot restart gateway",
+            reply_to_bot=True,
+            entities=[_mention_entity("@other_bot restart gateway", mention="@other_bot")],
+        )
+    ) is False
+
+
+def test_group_messages_drop_leading_mentions_for_other_bots_when_open_group():
+    adapter = _make_adapter(require_mention=False)
+
+    assert adapter._should_process_message(
+        _group_message(
+            "@other_bot restart gateway",
+            entities=[_mention_entity("@other_bot restart gateway", mention="@other_bot")],
+        )
+    ) is False
+
+
+def test_group_messages_keep_nonleading_mentions_for_other_bots():
+    adapter = _make_adapter(require_mention=False)
+
+    assert adapter._should_process_message(
+        _group_message(
+            "share your skill to @other_bot",
+            entities=[_mention_entity("share your skill to @other_bot", mention="@other_bot")],
+        )
+    ) is True
+
+
+def test_group_messages_drop_commands_addressed_to_other_bots():
+    adapter = _make_adapter(require_mention=False)
+
+    assert adapter._should_process_message(
+        _group_message(
+            "/restart@other_bot",
+            entities=[_bot_command_entity("/restart@other_bot", "/restart@other_bot")],
+        ),
+        is_command=True,
+    ) is False
+
+
 def test_group_messages_can_be_opened_via_config():
     adapter = _make_adapter(require_mention=False)
 
