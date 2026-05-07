@@ -3226,6 +3226,21 @@ class GatewayRunner:
                         # be garbage-collected.  Otherwise the cache grows
                         # unbounded across the gateway's lifetime.
                         self._evict_cached_agent(key)
+                        # Interrupt any stuck _keep_typing task for this
+                        # session.  _session_expiry_watcher cleans up the
+                        # agent cache but does not set the interrupt event,
+                        # so a typing loop can outlive session expiry and
+                        # refresh the Telegram/Discord typing bubble forever.
+                        # Setting the event here signals _keep_typing's
+                        # stop_event poll (0.25 s cadence) to exit cleanly.
+                        _expiry_adapter = self.adapters.get(_platform)
+                        if _expiry_adapter is not None:
+                            _expiry_interrupt = _expiry_adapter._active_sessions.get(key)
+                            if _expiry_interrupt is not None:
+                                _expiry_interrupt.set()
+                            _expiry_task = _expiry_adapter._session_tasks.get(key)
+                            if _expiry_task is not None and not _expiry_task.done():
+                                _expiry_task.cancel()
                         # Mark as finalized and persist to disk so the flag
                         # survives gateway restarts.
                         with self.session_store._lock:
