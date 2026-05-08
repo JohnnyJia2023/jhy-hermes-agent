@@ -70,6 +70,57 @@ const TERMINAL_THEME = {
   selectionBackground: "#f0e6d244",
 };
 
+type ChatImageUploadResponse = {
+  ok: boolean;
+  path: string;
+};
+
+function clipboardImageFromPaste(ev: ClipboardEvent): File | null {
+  const items = Array.from(ev.clipboardData?.items ?? []);
+  for (const item of items) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      return item.getAsFile();
+    }
+  }
+  return null;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function uploadClipboardImage(
+  file: File,
+  token: string,
+): Promise<ChatImageUploadResponse> {
+  const resp = await fetch("/api/chat/upload-image", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Hermes-Session-Token": token,
+    },
+    body: JSON.stringify({
+      filename: file.name || null,
+      content_type: file.type || "image/png",
+      data: arrayBufferToBase64(await file.arrayBuffer()),
+    }),
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    throw new Error(detail || `HTTP ${resp.status}`);
+  }
+
+  return resp.json() as Promise<ChatImageUploadResponse>;
+}
+
 /**
  * CSS width for xterm font tiers.
  *
@@ -434,6 +485,27 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     term.open(host);
 
+    const onPasteImage = (ev: ClipboardEvent) => {
+      const file = clipboardImageFromPaste(ev);
+      if (!file) return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+
+      uploadClipboardImage(file, token)
+        .then((uploaded) => {
+          if (uploaded?.path) {
+            term.paste(uploaded.path);
+          }
+        })
+        .catch((err: Error) => {
+          console.warn("[dashboard clipboard] image paste failed:", err.message);
+          setBanner(`Image paste failed: ${err.message}`);
+        });
+    };
+
+    host.addEventListener("paste", onPasteImage, true);
+
     // WebGL draws from a texture atlas sized with device pixels. On phones and
     // in DevTools device mode that often produces *visually* much larger cells
     // than `fontSize` suggests — users see "huge" text even at 7–9px settings.
@@ -643,6 +715,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         "resize",
         scheduleSyncTerminalMetrics,
       );
+      host.removeEventListener("paste", onPasteImage, true);
       ro.disconnect();
       if (hostSyncRaf) cancelAnimationFrame(hostSyncRaf);
       if (settleRaf1) cancelAnimationFrame(settleRaf1);

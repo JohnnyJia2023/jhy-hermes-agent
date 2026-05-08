@@ -10,6 +10,8 @@ Usage:
 """
 
 import asyncio
+import base64
+import binascii
 import hmac
 import importlib.util
 import json
@@ -22,6 +24,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -77,6 +80,13 @@ _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``hermes dashboard --tui``
 # or HERMES_DASHBOARD_TUI=1.  Set from :func:`start_server`.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
+_DASHBOARD_CLIPBOARD_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_DASHBOARD_CLIPBOARD_IMAGE_TYPES = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 # Simple rate limiter for the reveal endpoint
 _reveal_timestamps: List[float] = []
@@ -458,6 +468,12 @@ class ModelAssignment(BaseModel):
     provider: str
     model: str
     task: str = ""
+
+
+class ChatImageUpload(BaseModel):
+    filename: Optional[str] = None
+    content_type: str
+    data: str
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
@@ -3071,6 +3087,55 @@ def _build_sidecar_url(channel: str) -> Optional[str]:
     qs = urllib.parse.urlencode({"token": _SESSION_TOKEN, "channel": channel})
 
     return f"ws://{netloc}/api/pub?{qs}"
+
+
+def _safe_clipboard_image_stem(filename: Optional[str]) -> str:
+    raw = Path(filename or "clipboard-image").stem.strip()
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in raw)
+    cleaned = cleaned.strip("-_")
+    return cleaned[:48] or "clipboard-image"
+
+
+@app.post("/api/chat/upload-image")
+async def upload_chat_clipboard_image(body: ChatImageUpload):
+    """Persist a browser clipboard image and return a local path for TUI paste.
+
+    The dashboard chat is an xterm-backed PTY, so browser clipboard images
+    cannot be forwarded as normal keystrokes.  Saving the image to the active
+    Hermes profile and pasting the resulting path lets the existing TUI
+    ``image.attach`` flow handle the attachment without a second chat surface.
+    """
+    content_type = (body.content_type or "").split(";", 1)[0].strip().lower()
+    suffix = _DASHBOARD_CLIPBOARD_IMAGE_TYPES.get(content_type)
+    if suffix is None:
+        raise HTTPException(status_code=415, detail="Unsupported image type")
+
+    try:
+        data = base64.b64decode(body.data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid image data")
+
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty image")
+    if len(data) > _DASHBOARD_CLIPBOARD_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Image is too large")
+
+    image_dir = get_hermes_home() / "images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    stem = _safe_clipboard_image_stem(body.filename)
+    path = image_dir / (
+        f"dashboard_clip_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_"
+        f"{stem}{suffix}"
+    )
+    path.write_bytes(data)
+
+    return {
+        "ok": True,
+        "path": str(path),
+        "name": path.name,
+        "size": len(data),
+        "content_type": content_type,
+    }
 
 
 async def _broadcast_event(channel: str, payload: str) -> None:
