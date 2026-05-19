@@ -11558,6 +11558,10 @@ class AIAgent:
                                 retry_count = 0
                                 compression_attempts = 0
                                 primary_recovery_attempted = False
+                                if self._needs_thinking_reasoning_pad():
+                                    for _fa_msg in api_messages:
+                                        if _fa_msg.get("role") == "assistant" and "reasoning_content" not in _fa_msg:
+                                            _fa_msg["reasoning_content"] = " "
                                 continue
                             # No fallback available — return with clear message
                             self._persist_session(messages, conversation_history)
@@ -11780,6 +11784,10 @@ class AIAgent:
                             retry_count = 0
                             compression_attempts = 0
                             primary_recovery_attempted = False
+                            if self._needs_thinking_reasoning_pad():
+                                for _fa_msg in api_messages:
+                                    if _fa_msg.get("role") == "assistant" and "reasoning_content" not in _fa_msg:
+                                        _fa_msg["reasoning_content"] = " "
                             continue
 
                         # Check for error field in response (some providers include this)
@@ -11850,6 +11858,10 @@ class AIAgent:
                                 retry_count = 0
                                 compression_attempts = 0
                                 primary_recovery_attempted = False
+                                if self._needs_thinking_reasoning_pad():
+                                    for _fa_msg in api_messages:
+                                        if _fa_msg.get("role") == "assistant" and "reasoning_content" not in _fa_msg:
+                                            _fa_msg["reasoning_content"] = " "
                                 continue
                             self._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
                             logging.error(f"{self.log_prefix}Invalid API response after {max_retries} retries.")
@@ -12815,6 +12827,10 @@ class AIAgent:
                                 retry_count = 0
                                 compression_attempts = 0
                                 primary_recovery_attempted = False
+                                if self._needs_thinking_reasoning_pad():
+                                    for _fa_msg in api_messages:
+                                        if _fa_msg.get("role") == "assistant" and "reasoning_content" not in _fa_msg:
+                                            _fa_msg["reasoning_content"] = " "
                                 continue
 
                     # ── Nous Portal: record rate limit & skip retries ─────
@@ -13143,6 +13159,13 @@ class AIAgent:
                             retry_count = 0
                             compression_attempts = 0
                             primary_recovery_attempted = False
+                            # Re-inject reasoning_content for thinking-mode providers (e.g. DeepSeek V4).
+                            # api_messages was built before the fallback switch; assistant messages
+                            # from non-thinking providers lack reasoning_content → HTTP 400 on DeepSeek.
+                            if self._needs_thinking_reasoning_pad():
+                                for _fa_msg in api_messages:
+                                    if _fa_msg.get("role") == "assistant" and "reasoning_content" not in _fa_msg:
+                                        _fa_msg["reasoning_content"] = " "
                             continue
                         if api_kwargs is not None:
                             self._dump_api_request_debug(
@@ -13210,6 +13233,10 @@ class AIAgent:
                             retry_count = 0
                             compression_attempts = 0
                             primary_recovery_attempted = False
+                            if self._needs_thinking_reasoning_pad():
+                                for _fa_msg in api_messages:
+                                    if _fa_msg.get("role") == "assistant" and "reasoning_content" not in _fa_msg:
+                                        _fa_msg["reasoning_content"] = " "
                             continue
                         _final_summary = self._summarize_api_error(api_error)
                         if is_rate_limited:
