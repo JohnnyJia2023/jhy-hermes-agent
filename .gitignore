@@ -71,3 +71,9 @@ mini-swe-agent/
 result
 website/static/api/skills-index.json
 models-dev-upstream/
+
+# Local scratch artifacts from ad hoc UI/media probes
+tinker-atropos/
+img_a.jpg
+img_b.jpg
+shelf_img_a.png
