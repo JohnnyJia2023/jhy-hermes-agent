@@ -79,3 +79,6 @@ img_a.jpg
 img_b.jpg
 shelf_img_a.png
 tinker-atropos/
+
+# Backup files
+*.bak
