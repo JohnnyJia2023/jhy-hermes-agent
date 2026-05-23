@@ -1903,16 +1903,6 @@ class TelegramAdapter(BasePlatformAdapter):
                         raise
                 message_ids.append(str(msg.message_id))
 
-            # Re-trigger typing indicator after sending a message.
-            # Telegram clears the typing state when a new message is delivered,
-            # so without this the "...typing" bubble disappears mid-response
-            # (especially noticeable when the agent sends intermediate progress
-            # messages like "Checking:" before running tools).
-            try:
-                await self.send_typing(chat_id, metadata=metadata)
-            except Exception:
-                pass  # Typing failures are non-fatal
-
             return SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
@@ -3997,6 +3987,30 @@ class TelegramAdapter(BasePlatformAdapter):
                     e,
                     exc_info=True,
                 )
+
+    async def stop_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Clear the typing indicator by sending a one-shot non-typing action.
+
+        Telegram has no native "stop typing" action. Sending any non-typing action
+        (e.g. ``upload_photo``) while a typing indicator is active immediately
+        clears it and replaces it with the new action (which Telegram shows for
+        ~5s then auto-clears).  We use ``upload_photo`` as the replacement since
+        it is lightweight and clearly non-typing.
+        """
+        if self._bot:
+            try:
+                message_thread_id: Optional[int] = None
+                if metadata:
+                    _typing_thread = self._metadata_thread_id(metadata)
+                    message_thread_id = self._message_thread_id_for_typing(_typing_thread)
+                await self._bot.send_chat_action(
+                    chat_id=int(chat_id),
+                    action="upload_photo",
+                    message_thread_id=message_thread_id,
+                )
+            except Exception:
+                # Non-fatal; Telegram auto-clears typing after ~5s anyway.
+                pass
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get information about a Telegram chat."""
