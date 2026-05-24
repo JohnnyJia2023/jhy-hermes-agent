@@ -1,0 +1,15 @@
+#!/bin/bash
+# Block deletion of protected branches (main, jhy/fix)
+
+while read local_ref local_sha remote_ref remote_sha; do
+    # Check if this is a deletion (local_sha is all zeros)
+    if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+        branch=$(echo "$remote_ref" | sed 's|refs/heads/||')
+        case "$branch" in
+            main|jhy/fix)
+                echo "ERROR: Deleting protected branch '$branch' is not allowed."
+                exit 1
+                ;;
+        esac
+    fi
+done

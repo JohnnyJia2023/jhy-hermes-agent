@@ -1,0 +1,13 @@
+#!/bin/bash
+# Block direct commits to main branch - use feature branches instead
+
+current_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+if [ "$current_branch" = "main" ]; then
+    echo "ERROR: Direct commits to 'main' are blocked."
+    echo "Please create and switch to a feature branch:"
+    echo "  git checkout -b your-feature-branch"
+    exit 1
+fi
+
+echo "Committing to branch: $current_branch"
