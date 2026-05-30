@@ -170,6 +170,7 @@ from agent.tool_result_classification import (
 )
 from agent.trajectory import (
     convert_scratchpad_to_think,
+    has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
 from agent.message_sanitization import (
@@ -4660,7 +4661,7 @@ class AIAgent:
                 tools=self.tools or None,
             )
 
-            if _preflight_tokens >= self.context_compressor.threshold_tokens:
+            if self.context_compressor.should_compress(_preflight_tokens):
                 logger.info(
                     "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
                     f"{_preflight_tokens:,}",
@@ -4754,6 +4755,7 @@ class AIAgent:
         truncated_response_prefix = ""
         compression_attempts = 0
         _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
+        failed = False  # Set True on hard preflight failures (e.g. Ollama runtime context too small)
         
         # Record the execution thread so interrupt()/clear_interrupt() can
         # scope the tool-level interrupt signal to THIS agent's thread only.
@@ -5076,7 +5078,27 @@ class AIAgent:
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
             approx_tokens = estimate_messages_tokens_rough(api_messages)
-            
+
+            # Preflight guard: if Ollama loaded the model with too small a
+            # runtime context for reliable tool use, fail fast with actionable
+            # guidance instead of burning the whole iteration budget on
+            # doomed API calls.
+            from agent.conversation_loop import _ollama_context_limit_error
+            _runtime_context_error = _ollama_context_limit_error(self, approx_tokens)
+            if _runtime_context_error:
+                final_response = _runtime_context_error
+                failed = True
+                _turn_exit_reason = "ollama_runtime_context_too_small"
+                messages.append({"role": "assistant", "content": final_response})
+                self._emit_status("❌ Ollama runtime context is too small for Hermes tool use")
+                api_call_count -= 1
+                self._api_call_count = api_call_count
+                try:
+                    self.iteration_budget.refund()
+                except Exception:
+                    pass
+                break
+
             # Thinking spinner for quiet mode (animated during API call)
             thinking_spinner = None
             
@@ -5631,16 +5653,36 @@ class AIAgent:
                                     truncated_response_prefix += assistant_message.content
 
                                 if length_continue_retries < 3:
-                                    self._vprint(
-                                        f"{self.log_prefix}↻ Requesting continuation "
-                                        f"({length_continue_retries}/3)..."
+                                    from hermes_constants import PARTIAL_STREAM_STUB_ID as _PARTIAL_STREAM_STUB_ID
+                                    from agent.conversation_loop import _get_continuation_prompt
+                                    _is_partial_stream_stub = (
+                                        getattr(response, "id", "") == _PARTIAL_STREAM_STUB_ID
                                     )
+                                    _dropped_tools = getattr(
+                                        response, "_dropped_tool_names", None
+                                    )
+                                    if _is_partial_stream_stub and _dropped_tools:
+                                        _tool_list = ", ".join(_dropped_tools[:3])
+                                        self._vprint(
+                                            f"{self.log_prefix}↻ Stream interrupted mid "
+                                            f"tool-call ({_tool_list}) — requesting "
+                                            f"chunked retry ({length_continue_retries}/3)..."
+                                        )
+                                    elif _is_partial_stream_stub:
+                                        self._vprint(
+                                            f"{self.log_prefix}↻ Stream interrupted — "
+                                            f"requesting continuation "
+                                            f"({length_continue_retries}/3)..."
+                                        )
+                                    else:
+                                        self._vprint(
+                                            f"{self.log_prefix}↻ Requesting continuation "
+                                            f"({length_continue_retries}/3)..."
+                                        )
                                     continue_msg = {
                                         "role": "user",
-                                        "content": (
-                                            "[System: Your previous response was truncated by the output "
-                                            "length limit. Continue exactly where you left off. Do not "
-                                            "restart or repeat prior text. Finish the answer directly.]"
+                                        "content": _get_continuation_prompt(
+                                            _is_partial_stream_stub, _dropped_tools
                                         ),
                                     }
                                     messages.append(continue_msg)
@@ -6628,8 +6670,17 @@ class AIAgent:
                                 force=True,
                             )
                         else:
-                            # Step down to the next probe tier
-                            new_ctx = get_next_probe_tier(old_ctx)
+                            # #33669: generic overflow without a provider-reported
+                            # max context length — keep the configured window and
+                            # rely on compression instead of guessing a smaller
+                            # probe tier (which can wrongly shrink a 200K/1M
+                            # window down to 128K/64K).
+                            new_ctx = old_ctx
+                            self._vprint(
+                                f"{self.log_prefix}Context length exceeded, but provider did not report a max "
+                                f"context length; keeping context_length at {old_ctx:,} tokens and compressing.",
+                                force=True,
+                            )
 
                         if new_ctx and new_ctx < old_ctx:
                             compressor.update_model(
@@ -7399,6 +7450,19 @@ class AIAgent:
                             f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
                         )
                         messages.append({"role": "assistant", "content": final_response})
+                        # Emit the halt message to the client so it's not
+                        # indistinguishable from a crash.  The stream display
+                        # was flushed (callback(None)) before tool execution,
+                        # but the callback is still alive — fire the text
+                        # through it so SSE/TUI clients see the explanation.
+                        if final_response:
+                            self._safe_print(f"\n{final_response}\n")
+                            if self.stream_delta_callback:
+                                try:
+                                    self.stream_delta_callback(final_response)
+                                    self.stream_delta_callback(None)
+                                except Exception:
+                                    pass
                         break
 
                     # Reset per-turn retry counters after successful tool
@@ -7936,7 +8000,7 @@ class AIAgent:
             final_response = self._handle_max_iterations(messages, api_call_count)
         
         # Determine if conversation completed successfully
-        completed = final_response is not None and api_call_count < self.max_iterations
+        completed = final_response is not None and api_call_count < self.max_iterations and not failed
 
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
         # list of parts; the trajectory format wants a plain string.
@@ -8060,6 +8124,7 @@ class AIAgent:
             "messages": messages,
             "api_calls": api_call_count,
             "completed": completed,
+            "failed": failed,
             "turn_exit_reason": _turn_exit_reason,
             "partial": False,  # True only when stopped due to invalid tool calls
             "interrupted": interrupted,
