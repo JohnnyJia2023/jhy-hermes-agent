@@ -39,7 +39,9 @@ import json
 import logging
 logger = logging.getLogger(__name__)
 import os
+import random
 import re
+import ssl
 import sys
 import tempfile
 import time
@@ -73,6 +75,7 @@ from agent.process_bootstrap import (
     OpenAI,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.OpenAI")
     _SafeWriter,  # noqa: F401  # re-exported for tests that `from run_agent import _SafeWriter`
     _get_proxy_for_base_url,
+    _install_safe_stdio,
 )
 from agent.iteration_budget import IterationBudget
 
@@ -106,14 +109,16 @@ from tools.browser_tool import cleanup_browser
 
 
 # Agent internals extracted to agent/ package for modularity
-from agent.memory_manager import sanitize_context
-from agent.error_classifier import FailoverReason
+from agent.memory_manager import sanitize_context, build_memory_context_block
+from agent.error_classifier import FailoverReason, classify_api_error
 from agent.redact import redact_sensitive_text
 from agent.model_metadata import (
     estimate_request_tokens_rough,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.estimate_request_tokens_rough")
+    estimate_messages_tokens_rough,
     is_local_endpoint,
 )
-from agent.usage_pricing import normalize_usage
+from agent.usage_pricing import normalize_usage, estimate_usage_cost
+from agent.prompt_caching import apply_anthropic_cache_control
 # Re-exported for tests that monkeypatch these symbols on run_agent.
 from agent.context_compressor import ContextCompressor  # noqa: F401
 from agent.retry_utils import jittered_backoff  # noqa: F401
@@ -148,7 +153,7 @@ from agent.trajectory import (
     save_trajectory as _save_trajectory_to_file,
 )
 from agent.process_bootstrap import _get_proxy_from_env  # noqa: F401
-from agent.message_sanitization import (  # noqa: F401
+from agent.message_sanitization import (
     _SURROGATE_RE,
     _sanitize_surrogates,
     _sanitize_structure_surrogates,
@@ -192,7 +197,7 @@ from agent.tool_dispatch_helpers import (
     _extract_error_preview,
     _trajectory_normalize_msg,  # noqa: F401  # re-exported for tests that `from run_agent import _trajectory_normalize_msg`
 )
-from utils import atomic_json_write, base_url_host_matches, base_url_hostname
+from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled
 
 
 
