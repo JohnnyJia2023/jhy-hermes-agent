@@ -4368,8 +4368,19 @@ def resolve_vision_provider_client(
         return resolved_provider, sync_client, final_model
 
     if resolved_base_url:
+        # Use the original caller-provided provider for credential resolution
+        # when a named provider was requested alongside an explicit base_url.
+        # _resolve_task_provider_model converts any explicit-base_url case to
+        # "custom", losing the credential chain (e.g. minimax → "no-key-required"
+        # because OPENAI_API_KEY is not set). Passing the original provider name
+        # through lets resolve_provider_client call
+        # resolve_api_key_provider_credentials(provider) to fetch the correct
+        # key from the env/pool, AND preserves the raw base_url string so
+        # _wrap_if_needed can detect Anthropic-wire endpoints correctly.
         provider_for_base_override = (
-            requested if requested and requested not in {"", "auto"} else "custom"
+            provider
+            if provider and provider not in {"", "auto", "custom"}
+            else (requested if requested and requested not in {"", "auto"} else "custom")
         )
         client, final_model = resolve_provider_client(
             provider_for_base_override,
