@@ -137,3 +137,7 @@ RELEASE_v*.md
 # Desktop demo-run scratch output (hermes writes demo/*.txt during recorded
 # walkthroughs). Throwaway artifacts, never part of the app.
 apps/desktop/demo/
+
+# Unrelated experiment repo (its own .git) that ended up cloned into this
+# working tree. Not part of hermes-agent; never track or submodule it.
+tinker-atropos/
