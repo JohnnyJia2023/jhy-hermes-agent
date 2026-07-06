@@ -8578,6 +8578,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # be garbage-collected.  Otherwise the cache grows
                         # unbounded across the gateway's lifetime.
                         self._evict_cached_agent(key)
+                        # Interrupt any stuck _keep_typing task for this
+                        # session. The expiry watcher cleans up the agent
+                        # cache but does not set the adapter interrupt event,
+                        # so a typing loop can otherwise outlive session
+                        # expiry and refresh the platform bubble forever.
+                        try:
+                            _expiry_adapter = self.adapters.get(Platform(_platform)) if _platform else None
+                        except ValueError:
+                            _expiry_adapter = None
+                        if _expiry_adapter is not None:
+                            _expiry_interrupt = _expiry_adapter._active_sessions.get(key)
+                            if _expiry_interrupt is not None:
+                                _expiry_interrupt.set()
+                            _expiry_task = _expiry_adapter._session_tasks.get(key)
+                            if _expiry_task is not None and not _expiry_task.done():
+                                _expiry_task.cancel()
                         # Permanently finalizing this session — one funnel
                         # call drops every conversation-scoped dict AND the
                         # boundary security state (approvals, update
