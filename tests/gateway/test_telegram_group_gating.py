@@ -473,6 +473,24 @@ def test_group_messages_can_require_direct_trigger_via_config():
     assert adapter_no_mention._should_process_message(_group_message("/status"), is_command=True) is True
 
 
+def test_group_messages_accept_cached_bot_username_when_runtime_username_missing():
+    adapter = _make_adapter(require_mention=True)
+    adapter._bot = SimpleNamespace(id=999, username=None)
+    adapter._bot_username = "jhy2026_bot"
+
+    assert adapter._should_process_message(
+        _group_message("hi @jhy2026_bot", entities=[_mention_entity("hi @jhy2026_bot", mention="@jhy2026_bot")])
+    ) is True
+
+
+def test_clean_bot_trigger_text_uses_cached_bot_username():
+    adapter = _make_adapter(require_mention=True)
+    adapter._bot = SimpleNamespace(id=999, username=None)
+    adapter._bot_username = "jhy2026_bot"
+
+    assert adapter._clean_bot_trigger_text("@jhy2026_bot please help") == "please help"
+
+
 def test_explicit_multi_bot_mentions_route_only_to_named_bots():
     text = "@research_bot @ops_bot hi"
     entities = _mention_entities(text, ["@research_bot", "@ops_bot"])

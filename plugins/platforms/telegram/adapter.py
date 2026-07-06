@@ -664,6 +664,7 @@ class TelegramAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.TELEGRAM)
         self._app: Optional[Application] = None
         self._bot: Optional[Bot] = None
+        self._bot_username: str = ""
         self._webhook_mode: bool = False
         self._mention_patterns = self._compile_mention_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
@@ -3652,6 +3653,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         await asyncio.sleep(wait)
                     else:
                         raise
+            await self._refresh_bot_identity()
             await self._app.start()
 
             # Decide between webhook and polling mode
@@ -7557,11 +7559,46 @@ class TelegramAdapter(BasePlatformAdapter):
 
         return mentioned_bot_usernames
 
+    def _configured_bot_username(self) -> str:
+        configured = ""
+        extra = getattr(self.config, "extra", None) or {}
+        if isinstance(extra, dict):
+            configured = str(extra.get("bot_username") or "").strip()
+        if not configured:
+            configured = os.getenv("TELEGRAM_BOT_USERNAME", "").strip()
+        return configured.lstrip("@").lower()
+
+    def _known_bot_username(self) -> str:
+        return (
+            (getattr(self, "_bot_username", "") or "").strip().lstrip("@").lower()
+            or (getattr(self._bot, "username", None) or "").strip().lstrip("@").lower()
+            or self._configured_bot_username()
+        )
+
+    async def _refresh_bot_identity(self) -> None:
+        if not self._bot:
+            self._bot_username = self._configured_bot_username()
+            return
+        try:
+            me = await self._bot.get_me()
+            username = getattr(me, "username", None) or getattr(self._bot, "username", None)
+            self._bot_username = str(username or "").strip().lstrip("@").lower()
+            if self._bot_username:
+                logger.info("[%s] Telegram bot identity: @%s", self.name, self._bot_username)
+        except Exception as exc:
+            self._bot_username = self._configured_bot_username() or self._known_bot_username()
+            logger.warning(
+                "[%s] Could not refresh Telegram bot username; mention detection will use fallback %r (%s)",
+                self.name,
+                self._bot_username,
+                exc,
+            )
+
     def _message_mentions_bot(self, message: Message) -> bool:
         if not self._bot:
             return False
 
-        bot_username = (getattr(self._bot, "username", None) or "").lstrip("@").lower()
+        bot_username = self._known_bot_username()
         bot_id = getattr(self._bot, "id", None)
         expected = f"@{bot_username}" if bot_username else None
 
@@ -7630,7 +7667,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return False
 
-        bot_username = (getattr(self._bot, "username", None) or "").lstrip("@").lower()
+        bot_username = self._known_bot_username()
         if not bot_username:
             return False
 
@@ -7657,9 +7694,12 @@ class TelegramAdapter(BasePlatformAdapter):
         return self._telegram_guest_mode() and self._message_mentions_bot(message)
 
     def _clean_bot_trigger_text(self, text: Optional[str]) -> Optional[str]:
-        if not text or not self._bot or not getattr(self._bot, "username", None):
+        if not text or not self._bot:
             return text
-        username = re.escape(self._bot.username)
+        username = self._known_bot_username()
+        if not username:
+            return text
+        username = re.escape(username)
         cleaned = re.sub(rf"(?i)@{username}\b[,:\-]*\s*", "", text).strip()
         return cleaned or text
 
