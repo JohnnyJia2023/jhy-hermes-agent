@@ -570,6 +570,56 @@ _EMBED_MAX_DIMENSION = 7900
 _RESIZE_TARGET_BYTES = 5 * 1024 * 1024
 
 
+_VISION_PROVIDER_SAFE_MIME_TYPES = {"image/jpeg", "image/png"}
+
+
+def _image_to_provider_safe_data_url(image_path: Path, mime_type: str) -> str:
+    """Return a data URL using image media types accepted by vision backends."""
+    if mime_type in _VISION_PROVIDER_SAFE_MIME_TYPES:
+        return _image_to_base64_data_url(image_path, mime_type=mime_type)
+
+    try:
+        from PIL import Image
+        import io as _io
+    except ImportError as exc:
+        raise ValueError(
+            f"Image media type {mime_type!r} must be converted to JPEG or PNG "
+            "before vision analysis. Install Pillow (`pip install Pillow`) or "
+            "send a JPEG/PNG image."
+        ) from exc
+
+    try:
+        img = Image.open(image_path)
+        img.load()
+    except Exception as exc:
+        raise ValueError(
+            f"Image media type {mime_type!r} could not be converted to JPEG or PNG "
+            f"for vision analysis: {exc}"
+        ) from exc
+
+    # Preserve alpha where it matters; otherwise JPEG keeps payloads smaller.
+    has_alpha = img.mode in ("RGBA", "LA") or (
+        img.mode == "P" and "transparency" in getattr(img, "info", {})
+    )
+    out_format = "PNG" if has_alpha else "JPEG"
+    out_mime = "image/png" if has_alpha else "image/jpeg"
+
+    if out_format == "JPEG" and img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    elif out_format == "PNG" and img.mode not in ("RGBA", "LA", "RGB", "L"):
+        img = img.convert("RGBA")
+
+    buf = _io.BytesIO()
+    save_kwargs = {"format": out_format}
+    if out_format == "JPEG":
+        save_kwargs["quality"] = 90
+    img.save(buf, **save_kwargs)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    logger.info("Converted %s image to %s for vision provider compatibility",
+                mime_type, out_mime)
+    return f"data:{out_mime};base64,{encoded}"
+
+
 def _is_image_size_error(error: Exception) -> bool:
     """Detect if an API error is related to image or payload size."""
     err_str = str(error).lower()
@@ -1176,7 +1226,7 @@ async def vision_analyze_tool(
         # can't saturate every core and starve the event loop.
         logger.info("Converting image to base64...")
         image_data_url = await _run_encode_on_cpu_executor(
-            _image_to_base64_data_url, temp_image_path, mime_type=detected_mime_type)
+            _image_to_provider_safe_data_url, temp_image_path, mime_type=detected_mime_type)
         data_size_kb = len(image_data_url) / 1024
         logger.info("Image converted to base64 (%.1f KB)", data_size_kb)
 

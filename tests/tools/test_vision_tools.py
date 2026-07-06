@@ -15,6 +15,7 @@ from tools.vision_tools import (
     _handle_vision_analyze,
     _determine_mime_type,
     _image_to_base64_data_url,
+    _image_to_provider_safe_data_url,
     _resize_image_for_vision,
     _image_exceeds_dimension,
     _EMBED_MAX_DIMENSION,
@@ -165,6 +166,34 @@ class TestImageToBase64DataUrl:
     def test_file_not_found_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             _image_to_base64_data_url(tmp_path / "nonexistent.png")
+
+
+# ---------------------------------------------------------------------------
+# _image_to_provider_safe_data_url
+# ---------------------------------------------------------------------------
+
+
+class TestImageToProviderSafeDataUrl:
+    def test_jpeg_passes_through_without_transcoding(self, tmp_path):
+        img = tmp_path / "test.jpg"
+        img.write_bytes(b"\xff\xd8\xff" + b"\x00" * 16)
+
+        result = _image_to_provider_safe_data_url(img, "image/jpeg")
+
+        assert result.startswith("data:image/jpeg;base64,")
+
+    def test_webp_is_transcoded_to_provider_safe_media_type(self, tmp_path):
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+
+        img = tmp_path / "test.webp"
+        Image.new("RGB", (10, 10), (255, 0, 0)).save(img, "WEBP")
+
+        result = _image_to_provider_safe_data_url(img, "image/webp")
+
+        assert result.startswith("data:image/jpeg;base64,")
 
 
 # ---------------------------------------------------------------------------
