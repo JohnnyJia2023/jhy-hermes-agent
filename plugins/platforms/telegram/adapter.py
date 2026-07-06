@@ -7416,6 +7416,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[%s] Ignoring invalid Telegram thread id: %r", self.name, value)
         return ignored
 
+    def _telegram_ignore_bot_senders(self) -> bool:
+        """Return whether messages sent by other bots should be silently dropped."""
+        configured = self.config.extra.get("ignore_bot_senders")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in ("true", "1", "yes", "on")
+            return bool(configured)
+        return os.getenv("TELEGRAM_IGNORE_BOT_SENDERS", "false").lower() in ("true", "1", "yes", "on")
+
     def _compile_mention_patterns(self) -> List[re.Pattern]:
         """Compile optional regex wake-word patterns for group triggers."""
         patterns = self.config.extra.get("mention_patterns")
@@ -8018,6 +8027,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
         if not self._is_group_chat(message):
             return True
+
+        # Drop messages sent by other bots when ignore_bot_senders is enabled.
+        if self._telegram_ignore_bot_senders():
+            sender = getattr(message, "from_user", None)
+            if sender and getattr(sender, "is_bot", False):
+                return False
 
         thread_id = self._effective_message_thread_id(message)
         allowed_topics = self._telegram_allowed_topics()
