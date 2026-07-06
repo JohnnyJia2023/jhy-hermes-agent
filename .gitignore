@@ -147,3 +147,12 @@ infographic/
 # Unrelated experiment repo (its own .git) that ended up cloned into this
 # working tree. Not part of hermes-agent; never track or submodule it.
 tinker-atropos/
+
+# Local scratch / temp files (jhy personal)
+.playwright-mcp/
+img_a.jpg
+img_b.jpg
+shelf_img_a.png
+
+# Backup files
+*.bak
