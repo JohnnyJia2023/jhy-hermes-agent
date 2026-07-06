@@ -34,7 +34,7 @@ import { ChatSidebar } from "@/components/ChatSidebar";
 import { ChatSessionList } from "@/components/ChatSessionList";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
-import { api } from "@/lib/api";
+import { api, fetchJSON } from "@/lib/api";
 import { normalizeSessionTitle } from "@/lib/chat-title";
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
@@ -89,6 +89,44 @@ function terminalTierWidthPx(host: HTMLElement | null): number {
   const vvw = vv?.width ?? inner;
   const layout = Math.min(inner, vvw, doc > 0 ? doc : inner);
   return Math.max(1, Math.round(layout));
+}
+
+type ChatImageUploadResponse = {
+  ok: boolean;
+  path: string;
+};
+
+function clipboardImageFromPaste(ev: ClipboardEvent): File | null {
+  const items = Array.from(ev.clipboardData?.items ?? []);
+  for (const item of items) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      return item.getAsFile();
+    }
+  }
+  return null;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function uploadClipboardImage(file: File): Promise<ChatImageUploadResponse> {
+  return fetchJSON<ChatImageUploadResponse>("/api/chat/upload-image", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name || null,
+      content_type: file.type || "image/png",
+      data: arrayBufferToBase64(await file.arrayBuffer()),
+    }),
+  });
 }
 
 function terminalFontSizeForWidth(layoutWidthPx: number): number {
@@ -530,6 +568,27 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     term.open(host);
 
+    const onPasteImage = (ev: ClipboardEvent) => {
+      const file = clipboardImageFromPaste(ev);
+      if (!file) return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+
+      uploadClipboardImage(file)
+        .then((uploaded) => {
+          if (uploaded?.path) {
+            term.paste(uploaded.path);
+          }
+        })
+        .catch((err: Error) => {
+          console.warn("[dashboard clipboard] image paste failed:", err.message);
+          setBanner(`Image paste failed: ${err.message}`);
+        });
+    };
+
+    host.addEventListener("paste", onPasteImage, true);
+
     // WebGL draws from a texture atlas sized with device pixels. On phones and
     // in DevTools device mode that often produces *visually* much larger cells
     // than `fontSize` suggests — users see "huge" text even at 7–9px settings.
@@ -835,6 +894,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         "resize",
         scheduleSyncTerminalMetrics,
       );
+      host.removeEventListener("paste", onPasteImage, true);
       ro.disconnect();
       if (hostSyncRaf) cancelAnimationFrame(hostSyncRaf);
       if (settleRaf1) cancelAnimationFrame(settleRaf1);

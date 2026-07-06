@@ -904,6 +904,21 @@ def _audio_extension_for_mime(mime_type: str) -> str:
     return _AUDIO_MIME_EXTENSIONS.get(normalized, ".webm")
 
 
+_DASHBOARD_CLIPBOARD_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_DASHBOARD_CLIPBOARD_IMAGE_TYPES = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+
+class ChatImageUpload(BaseModel):
+    filename: Optional[str] = None
+    content_type: str
+    data: str
+
+
 class ModelAssignment(BaseModel):
     """Payload for POST /api/model/set — assign a provider/model to a slot.
 
@@ -12491,6 +12506,55 @@ async def _resolve_chat_argv_async(
             _resolve_chat_argv,
             **kwargs,
         )
+
+
+def _safe_clipboard_image_stem(filename: Optional[str]) -> str:
+    raw = Path(filename or "clipboard-image").stem.strip()
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in raw)
+    cleaned = cleaned.strip("-_")
+    return cleaned[:48] or "clipboard-image"
+
+
+@app.post("/api/chat/upload-image")
+async def upload_chat_clipboard_image(body: ChatImageUpload):
+    """Persist a browser clipboard image and return a local path for TUI paste.
+
+    The dashboard chat is an xterm-backed PTY, so browser clipboard images
+    cannot be forwarded as normal keystrokes.  Saving the image to the active
+    Hermes profile and pasting the resulting path lets the existing TUI
+    ``image.attach`` flow handle the attachment without a second chat surface.
+    """
+    content_type = (body.content_type or "").split(";", 1)[0].strip().lower()
+    suffix = _DASHBOARD_CLIPBOARD_IMAGE_TYPES.get(content_type)
+    if suffix is None:
+        raise HTTPException(status_code=415, detail="Unsupported image type")
+
+    try:
+        data = base64.b64decode(body.data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid image data")
+
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty image")
+    if len(data) > _DASHBOARD_CLIPBOARD_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Image is too large")
+
+    image_dir = get_hermes_home() / "images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    stem = _safe_clipboard_image_stem(body.filename)
+    path = image_dir / (
+        f"dashboard_clip_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_"
+        f"{stem}{suffix}"
+    )
+    path.write_bytes(data)
+
+    return {
+        "ok": True,
+        "path": str(path),
+        "name": path.name,
+        "size": len(data),
+        "content_type": content_type,
+    }
 
 
 def _build_sidecar_url(channel: str) -> Optional[str]:

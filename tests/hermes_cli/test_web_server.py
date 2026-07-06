@@ -1,6 +1,7 @@
 """Tests for hermes_cli.web_server and related config utilities."""
 
 import asyncio
+import base64
 import os
 import json
 import shutil
@@ -6520,3 +6521,69 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
+
+
+class TestChatImageUpload:
+    @pytest.fixture(autouse=True)
+    def _setup_test_client(self, monkeypatch, _isolate_hermes_home):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        import hermes_cli.web_server as ws
+
+        self.ws = ws
+        self.client = TestClient(ws.app)
+        self.client.headers[ws._SESSION_HEADER_NAME] = ws._SESSION_TOKEN
+
+    def test_saves_clipboard_image_to_hermes_images(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setattr(self.ws, "get_hermes_home", lambda: hermes_home)
+
+        resp = self.client.post(
+            "/api/chat/upload-image",
+            json={
+                "filename": "Screenshot 2026-05-04.png",
+                "content_type": "image/png",
+                "data": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii"),
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        saved = Path(data["path"])
+        assert saved.parent == hermes_home / "images"
+        assert saved.suffix == ".png"
+        assert "Screenshot-2026-05-04" in saved.name
+        assert saved.read_bytes() == b"\x89PNG\r\n\x1a\n"
+
+    def test_rejects_non_image_payload(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(self.ws, "get_hermes_home", lambda: tmp_path)
+
+        resp = self.client.post(
+            "/api/chat/upload-image",
+            json={
+                "filename": "note.txt",
+                "content_type": "text/plain",
+                "data": base64.b64encode(b"hello").decode("ascii"),
+            },
+        )
+
+        assert resp.status_code == 415
+
+    def test_requires_session_token(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(self.ws.app)
+
+        resp = client.post(
+            "/api/chat/upload-image",
+            json={
+                "filename": "x.png",
+                "content_type": "image/png",
+                "data": base64.b64encode(b"x").decode("ascii"),
+            },
+        )
+
+        assert resp.status_code == 401
