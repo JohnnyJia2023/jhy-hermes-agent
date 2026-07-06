@@ -924,7 +924,7 @@ async def _vision_analyze_native(
             )
 
         image_data_url = await _run_encode_on_cpu_executor(
-            _image_to_base64_data_url,
+            _image_to_provider_safe_data_url,
             temp_image_path, mime_type=detected_mime_type,
         )
 
