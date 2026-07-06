@@ -34,6 +34,7 @@ import os
 import re
 import shlex
 import site
+import subprocess
 import sys
 import signal
 import tempfile
@@ -573,6 +574,118 @@ def _resolve_gateway_display_bool(
     if value is None:
         return bool(default)
     return bool(value)
+
+
+def _free_claude_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    raw = config.get("free_claude") or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _free_claude_is_enabled(config: Optional[Dict[str, Any]]) -> bool:
+    fc = _free_claude_config(config)
+    command = fc.get("command")
+    return bool(fc.get("enabled") is True and isinstance(command, list) and command)
+
+
+def _build_free_claude_prompt(
+    message: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+    *,
+    max_history_chars: int = 8000,
+) -> str:
+    """Build the text-only payload sent to the local free_claude command."""
+    history = history or []
+    history_lines: List[str] = []
+    for item in history[-12:]:
+        role = str(item.get("role") or "").strip()
+        content = item.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip():
+            continue
+        history_lines.append(f"{role}: {content.strip()}")
+    history_text = "\n\n".join(history_lines)
+    if len(history_text) > max_history_chars:
+        history_text = history_text[-max_history_chars:]
+        history_text = "[Earlier history truncated]\n" + history_text
+
+    return (
+        "You are the text-only reasoning engine for Hermes.\n"
+        "Hermes has already handled platform routing and media preprocessing. "
+        "Reply to the user using only the text payload below.\n\n"
+        "[Hermes sub-agent contract]\n"
+        "Hermes has a `delegate_task` sub-agent tool. It spawns isolated child "
+        "agents with their own context and terminal session. Single-task form "
+        "uses `goal` plus optional `context` and `toolsets`; batch form uses "
+        "`tasks: [...]` and runs children in parallel, capped by "
+        "`delegation.max_concurrent_children`. The default child role is "
+        "`leaf`; use `role=\"orchestrator\"` only when the child must spawn its "
+        "own workers and the configured depth allows it. `delegate_task` is "
+        "synchronous and not durable: Hermes waits for the child summary, and "
+        "interruption cancels the child. For long-running work that must "
+        "outlive the current turn, use a durable mechanism such as cron or a "
+        "background terminal job instead. When delegation is useful, tell "
+        "Hermes exactly what sub-agent to run: include the goal, complete "
+        "context, required files/commands, expected output, toolsets, role, "
+        "and model tier. Do not claim a sub-agent was run unless Hermes "
+        "returns its result.\n\n"
+        "[Conversation context]\n"
+        f"{history_text or '(none)'}\n\n"
+        "[Current user message]\n"
+        f"{message or ''}"
+    ).strip()
+
+
+def _run_free_claude_command(prompt: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    fc = _free_claude_config(config)
+    command = fc.get("command") or []
+    if not isinstance(command, list) or not command:
+        return {"ok": False, "error": "free_claude.command is not configured"}
+    command = [str(part) for part in command]
+    timeout = float(fc.get("timeout") or 900)
+    cwd = str(fc.get("cwd") or os.getcwd())
+    max_output_chars = int(fc.get("max_output_chars") or 60000)
+    max_input_chars = int(fc.get("max_input_chars") or 120000)
+    payload = (prompt or "")[:max_input_chars]
+
+    env = os.environ.copy()
+    for key, value in (fc.get("env") or {}).items() if isinstance(fc.get("env"), dict) else []:
+        env[str(key)] = str(value)
+
+    try:
+        proc = subprocess.run(
+            command,
+            input=payload,
+            text=True,
+            capture_output=True,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "timeout": True,
+            "error": f"free_claude timed out after {timeout:g}s",
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"free_claude failed to start: {exc}"}
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "exit_code": proc.returncode,
+            "error": stderr[-max_output_chars:] or stdout[-max_output_chars:] or f"exit {proc.returncode}",
+        }
+    return {
+        "ok": True,
+        "text": stdout[-max_output_chars:],
+        "stderr": stderr[-max_output_chars:],
+        "exit_code": proc.returncode,
+    }
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -16421,6 +16534,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not resolved_model:
                 resolved_model = _read_main_model()
 
+            if _free_claude_is_enabled(cfg):
+                return "text"
             return decide_image_input_mode(resolved_provider, resolved_model, cfg)
         except Exception as exc:
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
@@ -20782,6 +20897,59 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         getattr(_sn_adapter, "interactive_resume", True)
                     ),
                 )
+
+            if _free_claude_is_enabled(user_config):
+                self._consume_pending_native_image_paths(session_key)
+                fc_prompt = _build_free_claude_prompt(message, agent_history)
+                fc_result = _run_free_claude_command(fc_prompt, user_config)
+                if fc_result.get("ok") and str(fc_result.get("text") or "").strip():
+                    return {
+                        "final_response": str(fc_result.get("text") or "").strip(),
+                        "messages": agent_history
+                        + [
+                            {"role": "user", "content": message},
+                            {
+                                "role": "assistant",
+                                "content": str(fc_result.get("text") or "").strip(),
+                            },
+                        ],
+                        "api_calls": 1,
+                        "failed": False,
+                        "partial": False,
+                        "completed": True,
+                        "interrupted": False,
+                        "interrupt_message": None,
+                        "error": None,
+                        "compression_exhausted": False,
+                        "tools": tools_holder[0] or [],
+                        "history_offset": len(agent_history),
+                        "last_prompt_tokens": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "model": "free_claude",
+                        "context_length": 0,
+                    }
+                logger.warning("free_claude route failed: %s", fc_result.get("error"))
+                if not _free_claude_config(user_config).get("fallback_to_hermes_model", True):
+                    return {
+                        "final_response": f"⚠️ free_claude failed: {fc_result.get('error') or 'unknown error'}",
+                        "messages": agent_history,
+                        "api_calls": 0,
+                        "failed": True,
+                        "partial": False,
+                        "completed": False,
+                        "interrupted": False,
+                        "interrupt_message": None,
+                        "error": fc_result.get("error"),
+                        "compression_exhausted": False,
+                        "tools": tools_holder[0] or [],
+                        "history_offset": len(agent_history),
+                        "last_prompt_tokens": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "model": "free_claude",
+                        "context_length": 0,
+                    }
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
