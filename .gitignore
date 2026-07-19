@@ -115,6 +115,7 @@ models-dev-upstream/
 .mcp.json
 opencode.json
 config/mcporter.json
+CLAUDE.md
 
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
@@ -158,3 +159,11 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Local scratch and unrelated workspace checkout
+.playwright-mcp/
+img_a.jpg
+img_b.jpg
+shelf_img_a.png
+*.bak
+tinker-atropos/
